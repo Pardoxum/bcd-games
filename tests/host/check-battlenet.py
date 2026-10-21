@@ -33,6 +33,9 @@ import Foundation
 import FoundationNetworking
 #endif
 
+enum BCDContentError: Error { case http(Int), tooLarge }
+struct BCDContentChunk {}
+
 func require(_ value: @autoclosure () throws -> Bool, _ label: String) rethrows {
     guard try value() else { fatalError("FAIL: " + label) }
     print("PASS: " + label)
@@ -66,6 +69,15 @@ func refuses(_ label: String, _ body: () throws -> Void) {
         let request = try credential.request("/api/games-and-subs", now: now)
         require(request.url?.host == "account.blizzard.com", "credential pinned to account host")
         require(request.value(forHTTPHeaderField: "Cookie") == "session=SECRET", "cookie applied to account API")
+        let stream = BCDHTTPStream(redirectAllowed: { _ in false })
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: request)
+        let redirect = HTTPURLResponse(url: request.url!, statusCode: 302, httpVersion: nil, headerFields: nil)!
+        var redirected: URLRequest? = request
+        stream.urlSession(session, task: task, willPerformHTTPRedirection: redirect,
+            newRequest: URLRequest(url: URL(string: "https://evil.test")!)) { redirected = $0 }
+        require(redirected == nil, "redirect cannot forward account cookies")
+        task.cancel(); session.invalidateAndCancel(); stream.close()
         require(!String(describing: credential).contains("SECRET") && !String(reflecting: credential).contains("SECRET"), "redacted credential")
         refuses("no arbitrary API paths") { _ = try credential.request("/payments", now: now) }
         refuses("no credential after expiry") { _ = try credential.request("/api/games-and-subs", now: now.addingTimeInterval(301)) }
@@ -91,5 +103,6 @@ with tempfile.TemporaryDirectory(prefix="bcd-battlenet-") as directory:
     harness.write_text(HARNESS)
     executable = directory / "checks"
     subprocess.run([swift, "-swift-version", "5", "-parse-as-library", str(APP / "BCDBattleNet/BCDBattleNetAccount.swift"),
+                    str(APP / "BCDContent/BCDContentFetch.swift"),
                     str(harness), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True)
