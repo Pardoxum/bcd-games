@@ -87,10 +87,10 @@ import WebKit
         navigationItem.rightBarButtonItem?.isEnabled = false
         status.text = "Reading your Battle.net account…"
         checking = Task { [weak self] in
-            guard let self else { return }
+            guard let self, !Task.isCancelled, !finished, let page = web else { return }
             defer { checking = nil; navigationItem.rightBarButtonItem?.isEnabled = true }
             let cookies = await withCheckedContinuation { continuation in
-                self.web.configuration.websiteDataStore.httpCookieStore.getAllCookies { continuation.resume(returning: $0) }
+                page.configuration.websiteDataStore.httpCookieStore.getAllCookies { continuation.resume(returning: $0) }
             }
             guard !Task.isCancelled, !finished else { return }
             let made = BCDBattleNetCredential(origin: origin, cookies: cookies.compactMap {
@@ -110,6 +110,7 @@ import WebKit
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard !finished, let web else { return nil }
         let child = WKWebView(frame: web.frame, configuration: configuration)
         child.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         child.navigationDelegate = self; child.uiDelegate = self
@@ -118,6 +119,7 @@ import WebKit
     }
 
     func webViewDidClose(_ webView: WKWebView) {
+        guard popups.contains(where: { $0 === webView }) else { return }
         popups.removeAll { $0 === webView }; webView.removeFromSuperview()
     }
 

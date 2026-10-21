@@ -1,7 +1,6 @@
 name: Battle.net account checks
 on:
-  push:
-    branches: [battle.net-support]
+  workflow_dispatch:
   pull_request:
     paths:
       - 'app/Madeira/BCDBattleNet/**'
