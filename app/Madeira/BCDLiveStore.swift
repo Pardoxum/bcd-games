@@ -72,6 +72,7 @@ import os
             account.$playtime.map { _ in () }.eraseToAnyPublisher(),
             SteamSignInModel.shared.$accountName.map { _ in () }.eraseToAnyPublisher(),
             gogChanges,
+            BCDBattleNet.shared.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
         ]
         // @Published sends before the value is stored: the rebuild runs a moment later, and at
         // most a few times a second while a download reports its progress.
@@ -198,6 +199,7 @@ import os
             games.append(game)
         }
         gogMerge(&games)
+        battleNetMerge(&games)
         games.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
         if store.games != games { store.games = games }
 
@@ -210,6 +212,7 @@ import os
             // Not in this build yet.
             BCDAccount(store: .epic, name: nil, available: false),
             gogAccount(),
+            battleNetAccount(),
         ]
         if store.accounts != accounts { store.accounts = accounts }
         noteSavesDiffer()
@@ -661,12 +664,14 @@ import os
     func startDock(_ game: DockGame, _ compactPool: Bool) { settled { [weak self] in self?.dockStart?(game, compactPool) } }
 
     func signIn(_ front: BCDStoreFront) {
+        if front == .battlenet { BCDBattleNet.shared.signIn(); return }
         if gogAccountAction(signIn: true, front) { return }
         guard front == .steam else { return }   // Epic is not in this build yet: its sign-in plugs in here
         settled { [weak self] in self?.sheet = .steamSignIn }
     }
 
     func signOut(_ front: BCDStoreFront) {
+        if front == .battlenet { BCDBattleNet.shared.signOut(); return }
         if gogAccountAction(signIn: false, front) { return }
         guard front == .steam else { return }
         SteamSignInModel.shared.signOut()
@@ -677,6 +682,7 @@ import os
     func refreshLibrary() {
         Task { await SteamGamesModel.refreshAll() }
         gogRefresh()
+        BCDBattleNet.shared.refresh(force: true)
         rebuild()
     }
 }

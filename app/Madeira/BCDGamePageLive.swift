@@ -105,7 +105,9 @@ import UniformTypeIdentifiers
         if d.lastPlayed == nil { d.lastPlayed = entry.lastPlayed }
         d.blockers = blockers(entry, appID: id)
         // GOG's runtimes the game's build names that BCD does not install yet.
-        d.storeNote = BCDLiveStore.shared.gogNote(game.id)
+        d.storeNote = game.store == .battlenet
+            ? "Use WoW's own login. Connecting Battle.net in BCD doesn't sign the game in; this client hasn't been verified on iPhone or iPad."
+            : BCDLiveStore.shared.gogNote(game.id)
         // The sections only while Options is open: nothing is built for what is not on screen.
         if settings {
             d.groups = [display(entry, profile), direct3D(entry, profile), compatibility(entry), controls(entry, profile)]

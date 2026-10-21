@@ -70,6 +70,10 @@ struct BCDSteamSignIn: Equatable {
     /// Opens GOG's own sign-in page.
     func signInGOG()
     func signOutGOG()
+    var battleNetAccount: BCDAccount { get }
+    var battleNetError: String? { get }
+    func signInBattleNet()
+    func signOutBattleNet()
 }
 
 enum BCDAccountsPage: Equatable {
@@ -93,6 +97,7 @@ struct BCDAccountsSection<Backend: BCDAccountsBackend>: View {
     @State private var page: BCDAccountsPage
     @State private var confirmingSignOut = false
     @State private var confirmingGOGSignOut = false
+    @State private var confirmingBattleNetSignOut = false
 
     init(backend: Backend, showsTitle: Bool = true, scrolls: Bool = true, startOn page: BCDAccountsPage = .main,
          back: (() -> Void)? = nil, backHook: BCDSectionKit.BackHook? = nil) {
@@ -117,7 +122,7 @@ struct BCDAccountsSection<Backend: BCDAccountsBackend>: View {
                 }
             }
         }
-        .modifier(BCDSectionKit.Buttons(focus: focus, key: "\(page)-\(confirmingSignOut)-\(confirmingGOGSignOut)",
+        .modifier(BCDSectionKit.Buttons(focus: focus, key: "\(page)-\(confirmingSignOut)-\(confirmingGOGSignOut)-\(confirmingBattleNetSignOut)",
                                         inner: closeInner, back: back, hook: backHook))
         .onAppear { backend.refresh() }
         .onChange(of: backend.steam.accountName) { _, name in
@@ -126,10 +131,18 @@ struct BCDAccountsSection<Backend: BCDAccountsBackend>: View {
         .onChange(of: backend.gogAccount.name) { _, name in
             if name == nil { confirmingGOGSignOut = false }
         }
+        .onChange(of: backend.battleNetAccount.name) { _, name in
+            if name == nil { confirmingBattleNetSignOut = false }
+        }
     }
 
     /// B inside the section: the question closes, then the sign-in page. False: nothing was open.
     private func closeInner() -> Bool {
+        if confirmingBattleNetSignOut {
+            confirmingBattleNetSignOut = false
+            if focus.controllerActive { focus.focused = Self.prefix + "battlenet.signout" }
+            return true
+        }
         if confirmingGOGSignOut {
             confirmingGOGSignOut = false
             if focus.controllerActive { focus.focused = Self.prefix + "gog.signout" }
@@ -162,6 +175,7 @@ struct BCDAccountsSection<Backend: BCDAccountsBackend>: View {
                 steamCard
             } right: {
                 gogCard
+                battleNetCard
                 moreStores
                 keptNote
             }
@@ -343,6 +357,47 @@ struct BCDAccountsSection<Backend: BCDAccountsBackend>: View {
                     if focus.controllerActive { focus.focused = Self.prefix + "gog.signout" }
                 },
             ])
+    }
+
+    private var battleNetCard: some View {
+        BCDSectionKit.Card(eyebrow: "Battle.net", symbol: "globe") {
+            let account = backend.battleNetAccount
+            if !account.available {
+                BCDSectionKit.Note(text: "Battle.net is unavailable in this copy of BCD.", symbol: "nosign")
+            } else {
+                Text(account.name ?? "Not signed in").bcdFont(.heading, 19)
+                BCDSectionKit.Note(text: "Connect your Battle.net account to see WoW Retail, Classic and Classic Era in your library. Downloads and automatic game login aren't available yet.", symbol: "info.circle")
+                if let error = backend.battleNetError {
+                    BCDSectionKit.Note(text: error, symbol: "exclamationmark.triangle")
+                }
+                if account.name != nil {
+                    if confirmingBattleNetSignOut {
+                        BCDSectionKit.Confirm(title: "Sign out of Battle.net?",
+                            message: "BCD forgets this device's Battle.net session and its WoW list. This doesn't sign you out in other apps or delete any game files.",
+                            choices: [
+                                .init(title: "Sign out", kind: .danger, id: Self.prefix + "battlenet.signout.confirm") {
+                                    confirmingBattleNetSignOut = false
+                                    backend.signOutBattleNet()
+                                    if focus.controllerActive { focus.focused = Self.prefix + "battlenet.signin" }
+                                },
+                                .init(title: "Cancel", kind: .outline, id: Self.prefix + "battlenet.signout.cancel") {
+                                    confirmingBattleNetSignOut = false
+                                    if focus.controllerActive { focus.focused = Self.prefix + "battlenet.signout" }
+                                },
+                            ])
+                    } else {
+                        BCDSectionKit.ActionButton(title: "Sign out", symbol: "rectangle.portrait.and.arrow.right", kind: .danger,
+                            id: Self.prefix + "battlenet.signout") {
+                                confirmingBattleNetSignOut = true
+                                if focus.controllerActive { focus.focused = Self.prefix + "battlenet.signout.cancel" }
+                            }
+                    }
+                } else {
+                    BCDSectionKit.ActionButton(title: "Sign in to Battle.net", symbol: "person.crop.circle.badge.plus", kind: .primary,
+                        fill: true, id: Self.prefix + "battlenet.signin") { backend.signInBattleNet() }
+                }
+            }
+        }
     }
 
     // MARK: The other stores

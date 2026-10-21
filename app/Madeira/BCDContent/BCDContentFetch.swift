@@ -37,9 +37,12 @@ final class BCDHTTPStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
     private var session: URLSession!
     private let lock = NSLock()
     private var requests: [Int: Request] = [:]
+    private let redirectAllowed: (@Sendable (URL) -> Bool)?
 
     /// `protocols`: URLProtocol classes answering before the network (the host checks' stand-in servers).
-    init(timeout: TimeInterval = 30, protocols: [AnyClass] = []) {
+    init(timeout: TimeInterval = 30, protocols: [AnyClass] = [],
+         redirectAllowed: (@Sendable (URL) -> Bool)? = nil) {
+        self.redirectAllowed = redirectAllowed
         super.init()
         let config = URLSessionConfiguration.ephemeral
         if !protocols.isEmpty { config.protocolClasses = protocols + (config.protocolClasses ?? []) }
@@ -165,6 +168,9 @@ final class BCDHTTPStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
     // Redirects are followed only to https.
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        if let redirectAllowed {
+            guard let url = newRequest.url, redirectAllowed(url) else { completionHandler(nil); return }
+        }
         completionHandler(newRequest.url?.scheme == "https" || response.url?.scheme == "http" ? newRequest : nil)
     }
 }

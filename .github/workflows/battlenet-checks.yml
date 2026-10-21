@@ -1,0 +1,29 @@
+name: Battle.net account checks
+on:
+  push:
+    branches: [battle.net-support]
+  pull_request:
+    paths:
+      - 'app/Madeira/BCDBattleNet/**'
+      - 'app/Madeira/BCDAccounts*'
+      - 'app/Madeira/BCDStore.swift'
+      - 'app/Madeira/BCDGamePage.swift'
+      - 'app/Madeira/BCDContent/BCDContentFetch.swift'
+      - 'tests/host/check-battlenet.py'
+      - 'tests/host/battlenet-ios-stubs.swift'
+      - '.github/workflows/battlenet-checks.yml'
+permissions:
+  contents: read
+jobs:
+  account:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tests/host/check-battlenet.py --require-swift
+      - name: Typecheck account adapter against iOS SDK
+        run: |
+          xcrun --sdk iphoneos swiftc -typecheck -swift-version 5 -target arm64-apple-ios18.0 -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" app/Madeira/BCDBattleNet/BCDBattleNetAccount.swift app/Madeira/BCDBattleNet/BCDBattleNet.swift app/Madeira/BCDBattleNet/BCDBattleNetSignIn.swift app/Madeira/BCDContent/BCDContentFetch.swift app/Madeira/BCDContent/BCDContentSecrets.swift tests/host/battlenet-ios-stubs.swift
+      - name: Parse iOS sources
+        run: |
+          xcrun swiftc -frontend -parse app/Madeira/BCDBattleNet/*.swift app/Madeira/BCDAccounts.swift app/Madeira/BCDAccountsLive.swift app/Madeira/BCDStore.swift app/Madeira/BCDLiveStore.swift app/Madeira/BCDGamePage.swift app/Madeira/BCDContent/BCDContentFetch.swift app/BCDPreview/BCDPreviewAccounts.swift
