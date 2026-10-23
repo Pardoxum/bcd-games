@@ -63,6 +63,9 @@ func runDownloadChecks() async throws {
     let body = Data("MZ synthetic fixture, never executed".utf8), raw = plainBLTE(body)
     let encoded = BCDBnetNGDP.md5(raw), content = BCDBnetNGDP.md5(body)
     try require(try BCDBnetBLTE.decode(raw, key: encoded, limit: body.count) == body, "decode single-frame BLTE")
+    let compressed = Data([120, 156, 243, 141, 82, 40, 174, 204, 43, 201, 72, 45, 201, 76, 86, 72, 203, 172, 40, 41, 45, 74, 213, 81, 200, 75, 45, 75, 45, 82, 72, 173, 72, 77, 46, 45, 73, 77, 1, 0, 249, 155, 13, 173])
+    let zipped = Data("BLTE".utf8) + Data(repeating: 0, count: 4) + Data([90]) + compressed
+    try require(try BCDBnetBLTE.decode(zipped, key: BCDBnetNGDP.md5(zipped), limit: body.count) == body, "decode zlib BLTE client file")
     let framed = framedBLTE(body), framedKey = BCDBnetNGDP.md5(framed.prefix(36))
     try require(try BCDBnetBLTE.decode(framed, key: framedKey, limit: body.count) == body, "decode checked BLTE frames")
     let collector = BCDHTTPCollector(limit: framed.count)
