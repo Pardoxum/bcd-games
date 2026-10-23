@@ -50,8 +50,8 @@ Temporary payloads are removed after registration. Client files are under
 
 ## Remaining work
 
-- Compile and run the new Swift protocol/engine tests and iOS type checks on Apple's toolchain.
-  Windows source checks cannot verify Swift compilation. GitHub Actions must be enabled.
+- Keep running Swift protocol/engine tests and iOS type checks on Apple's toolchain after changes.
+  These checks passed in GitHub Actions; Windows source checks alone cannot verify compilation.
 - Test real sign-in, Authenticator/passkeys, session expiry and library refresh on a device.
 - Test complete official downloads, launching and in-game login with a subscription account
   through the Wine/FEX/rendering path. Synthetic fixtures do not demonstrate WoW compatibility.
@@ -65,7 +65,10 @@ Temporary payloads are removed after registration. Client files are under
 Run `python3 tests/host/check-battlenet.py --require-swift` on macOS. Synthetic tests cover
 cookie isolation, credential redaction, library caching and deduplication, manifest tag
 selection, BLTE corruption/bounds, archive ranges, disk refusal, journal reuse, CASC assembly
-and interrupted-registration recovery. They never contact Blizzard or execute a game binary.
+and interrupted-registration recovery. By default they never contact Blizzard or execute a game binary.
+The optional `--live-metadata` check also fetches and validates current public Classic Era
+encoding/install/download manifests. It does not use an account or download game payloads;
+its CI step is non-blocking because external service availability is outside the unit tests.
 The Battle.net workflow also runs shared content/GOG regression tests, iOS adapter type checks
 and shared interface/preview compilation. Full app builds and live device checks remain separate.
 
@@ -78,5 +81,7 @@ and shared interface/preview compilation. Full app builds and live device checks
   [cascette-py](https://github.com/wowemulation-dev/cascette-py): protocol references for
   public NGDP manifests, BLTE and local CASC layouts. The adapter is independently written.
 
-Small live metadata probes have confirmed the v2 version endpoints, configuration hashes
-and current manifest headers. They have not verified a complete installed game.
+The live Swift metadata check has validated current Classic Era encoding/install/download
+manifests, their hashes, selected Windows client files and root content-key mappings. A separate
+bounded probe confirmed the current CDN archive index page/footer layout. These checks have
+not verified a complete installed game.
