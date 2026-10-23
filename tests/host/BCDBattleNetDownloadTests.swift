@@ -93,7 +93,10 @@ func runDownloadChecks() async throws {
     try require(try BCDBnetNGDP.download(dl, locale: "enUS").count == 1, "DL v3 flags and alternative tags")
     var page = Data([1]) + be(body.count, 5) + (try BCDBnetNGDP.keyBytes(content)) + (try BCDBnetNGDP.keyBytes(encoded))
     page.append(Data(repeating: 0, count: 1024 - page.count))
-    var en = Data("EN".utf8) + Data([1, 16, 16]) + be(1, 2) + be(1, 2) + be(1, 4) + be(1, 4) + Data([0]) + be(2, 4) + Data([78, 0])
+    var en = Data("EN".utf8)
+    en.append(contentsOf: [1, 16, 16]); en.append(be(1, 2)); en.append(be(1, 2))
+    en.append(be(1, 4)); en.append(be(1, 4)); en.append(0)
+    en.append(be(2, 4)); en.append(contentsOf: [78, 0])
     en.append(try BCDBnetNGDP.keyBytes(content)); en.append(try BCDBnetNGDP.keyBytes(BCDBnetNGDP.md5(page))); en.append(page)
     try require(try BCDBnetNGDP.encoding(en, wanted: [content])[content] == encoded, "content-to-encoding lookup with page hash")
     var badPage = en; badPage[badPage.count - 1] ^= 1
@@ -105,7 +108,7 @@ func runDownloadChecks() async throws {
     footer[8] = 1; footer[11] = 1; footer[12] = 4; footer[13] = 4; footer[14] = 16; footer[15] = 8; footer[16] = 1
     index.append(footer)
     let location = try BCDBnetNGDP.archive(index, archive: archiveKey, wanted: [encoded])[encoded]
-    require(location?.offset == 1234 && location?.size == raw.count, "paged CDN archive range lookup")
+    require(location?.offset == 1234 && location?.size == Int64(raw.count), "paged CDN archive range lookup")
     require(BCDBnetCASC.hash(Data()).0 == 0xdeadbeef, "lookup3 empty vector")
 
     FixtureProtocol.files = ["range": Data(0..<20)]
