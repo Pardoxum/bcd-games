@@ -437,7 +437,27 @@ struct ios_child_args {
  * as long as the game and used to end with it. */
 #define IOS_CHILD_SLOTS 32
 static pthread_mutex_t ios_child_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct { char name[64]; double started; int used; } ios_child_slots[IOS_CHILD_SLOTS];
+/* madeira-bcd (round 577, GTA IV freeze / Hello Neighbor TAW359): peb = the child's PEB once it registered with the
+ * wineserver (ios_child_slot_bind_peb); exited = its process ended (ios_child_slot_exited, from
+ * process_exit_wrapper, the chokepoint every exit reaches). A child whose process ended on a thread other than its
+ * boot thread never returns from wine_ios_child_main, so ios_child_slot_release below never ran for it and its slot
+ * stayed "used" for good: the launcher wait in WineProcessBridge.m then waited for a game that was long dead
+ * (TAW359: HelloNeighbor-Win64-Shipping.exe, abort_process 0xc0000005 on its thread 008c, "still running ... 60 s"
+ * and the session never ended). Used only to decide whether anything still runs; the slot itself is released
+ * as before. */
+#define IOS_CHILD_PATH 260
+static struct { char name[64]; char path[IOS_CHILD_PATH]; double started; int used; void *peb; int exited; double exited_at; int noted; } ios_child_slots[IOS_CHILD_SLOTS];
+/* madeira-bcd (round 579, BCD Dock: the game died and the session stayed open): the last processes that ended, with the
+ * status each ended with. The slots above are released when a child's boot thread returns (milliseconds after a healthy
+ * exit), so the status has to live elsewhere: this ring keeps the last IOS_CHILD_ENDED ends (process_exit_wrapper,
+ * through ios_child_slot_note_exit). Read by madeira_child_report (BCD Dock's game-end watch, Library.swift). */
+#define IOS_CHILD_ENDED 64
+static struct { char name[64]; char path[IOS_CHILD_PATH]; double started; double ended_at; int status; } ios_child_ended[IOS_CHILD_ENDED];
+static unsigned ios_child_ended_count;   /* ends ever noted; the ring holds the last IOS_CHILD_ENDED */
+/* spawns that found no free slot: processes this table cannot see (madeira_live_user_processes counts them as running) */
+static unsigned ios_child_untracked;
+/* the slot of the child whose boot thread this is (set by ios_child_thread_entry) */
+static _Thread_local int ios_child_slot_current = -1;
 
 static double ios_child_now(void)
 {
@@ -446,12 +466,57 @@ static double ios_child_now(void)
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+/* A child whose process ended and whose boot thread has not released the slot for this long never will (its
+ * ExitProcess ran on another thread). A child that ends on its boot thread releases it within milliseconds, so a
+ * healthy session sees no change: the slot counts until then, as it always did. */
+#define IOS_CHILD_EXIT_SETTLE 2.0
+static int ios_child_slot_gone( int i, double now )
+{
+    return ios_child_slots[i].exited && now - ios_child_slots[i].exited_at >= IOS_CHILD_EXIT_SETTLE;
+}
+
+/* build 580 (Crash Bandicoot N. Sane Trilogy 3CH670, build 579): the bare substring "crash" made
+ * CrashBandicootNSaneTrilogy.exe a "crash reporter", so BCD Dock's game-end watch (DockGameEnd.swift), 578's
+ * program-end watch and the launcher-stub wait never saw the game, and the session stayed "running" 211 s after
+ * the game died. "handler", "report" and "helper" still match as substrings, as before (every real helper in the
+ * 1421 intake logs has one of them: crashpad_handler, UnityCrashHandler32/64, crs-handler, RockstarErrorHandler,
+ * steamerrorreporter(64), SocialClubHelper, RockstarSteamHelper, CrashReportClient). "crash" alone now counts only when
+ * a helper word follows it (crashpad, crash_service, crash-sender, crashdump, crashrpt ...) or when it is the whole
+ * name (crash.exe, foo_crash.exe): never as the beginning of a game's name (crashbandicoot..., crashlands,
+ * crashteamracing..., crashday). The names are lower case, as ios_child_slot_take stores them. */
 static int ios_child_is_helper( const char *name )
 {
-    static const char *const parts[] = { "crash", "crs-handler", "handler", "report", "helper" };
+    static const char *const parts[] = { "crs-handler", "handler", "report", "helper" };
+    static const char *const after_crash[] = { "pad", "rpt", "send", "dump", "log", "monitor", "service", "submit",
+                                               "upload", "client", "server", "collect", "watch", "guard", "daemon",
+                                               "catch", "notif", "telemetry", "analy", "diag", "trace", "detect",
+                                               "util", "tool", "info", "manage", "process" };
+    const char *p;
     unsigned i;
     for (i = 0; i < ARRAY_SIZE(parts); i++) if (strstr( name, parts[i] )) return 1;
+    for (p = name; (p = strstr( p, "crash" )); p += 5)
+    {
+        const char *q = p + 5;
+        if (*q == '.' || !*q) { if (p == name || p[-1] == '_' || p[-1] == '-' || p[-1] == ' ') return 1; continue; }
+        if (*q == '_' || *q == '-' || *q == ' ') q++;
+        for (i = 0; i < ARRAY_SIZE(after_crash); i++)
+            if (!strncmp( q, after_crash[i], strlen( after_crash[i] ))) return 1;
+    }
     return 0;
+}
+
+/* The image path as the process was spawned (a Windows path), printable ASCII only, cut to IOS_CHILD_PATH - 1. Never logged:
+ * BCD Dock's game-end watch reads it to tell where a program lives (Library.swift). */
+static void ios_child_path_text( char *out, const UNICODE_STRING *image )
+{
+    unsigned i, len = image->Length / sizeof(WCHAR), n = 0;
+
+    for (i = 0; i < len && n < IOS_CHILD_PATH - 1; i++)
+    {
+        WCHAR c = image->Buffer[i];
+        out[n++] = (c >= 32 && c < 127 && c != '\t') ? (char)c : '?';
+    }
+    out[n] = 0;
 }
 
 static int ios_child_slot_take( const UNICODE_STRING *image )
@@ -474,10 +539,13 @@ static int ios_child_slot_take( const UNICODE_STRING *image )
         if (ios_child_slots[i].used) continue;
         ios_child_slots[i].used = 1;
         ios_child_slots[i].started = ios_child_now();
+        ios_child_slots[i].noted = 0;
         memcpy( ios_child_slots[i].name, name, n + 1 );
+        ios_child_path_text( ios_child_slots[i].path, image );
         slot = i;
         break;
     }
+    if (slot < 0) ios_child_untracked++;
     pthread_mutex_unlock( &ios_child_lock );
     return slot;
 }
@@ -487,7 +555,66 @@ static void ios_child_slot_release( int slot )
     if (slot < 0 || slot >= IOS_CHILD_SLOTS) return;
     pthread_mutex_lock( &ios_child_lock );
     ios_child_slots[slot].used = 0;
+    ios_child_slots[slot].peb = NULL;
+    ios_child_slots[slot].exited = 0;
+    ios_child_slots[slot].exited_at = 0;
+    ios_child_slots[slot].noted = 0;
     pthread_mutex_unlock( &ios_child_lock );
+}
+
+/* The child whose boot thread this is has registered its PEB with the wineserver (server_init_process_child). */
+void ios_child_slot_bind_peb( void *peb )
+{
+    int slot = ios_child_slot_current;
+    if (slot < 0 || slot >= IOS_CHILD_SLOTS || !peb) return;
+    pthread_mutex_lock( &ios_child_lock );
+    if (ios_child_slots[slot].used) { ios_child_slots[slot].peb = peb; ios_child_slots[slot].exited = 0; ios_child_slots[slot].exited_at = 0; }
+    pthread_mutex_unlock( &ios_child_lock );
+}
+
+/* The child process with this PEB ended (process_exit_wrapper). Marks the slot that holds it, whichever thread
+ * ended it; the slot itself is released when the child's boot thread returns, if it ever does. */
+void ios_child_slot_exited( void *peb )
+{
+    unsigned i;
+    double now = ios_child_now();
+    if (!peb) return;
+    pthread_mutex_lock( &ios_child_lock );
+    for (i = 0; i < IOS_CHILD_SLOTS; i++)
+        if (ios_child_slots[i].used && !ios_child_slots[i].exited && ios_child_slots[i].peb == peb)
+        {
+            ios_child_slots[i].exited = 1;
+            ios_child_slots[i].exited_at = now;
+        }
+    pthread_mutex_unlock( &ios_child_lock );
+}
+
+/* madeira-bcd (round 579): the child process with this PEB ended with this status (process_exit_wrapper, any thread,
+ * right after ios_child_slot_exited). Kept in the ring of ended processes with the slot's file name, image path, start
+ * and end time. Once per slot: a second call for the same process is ignored. No allocation, no logging. Returns 1 when
+ * the status was noted, 0 when no slot holds this PEB (the caller says so for a crash status: the watch would miss it). */
+int ios_child_slot_note_exit( void *peb, int status )
+{
+    unsigned i;
+    int noted = 0;
+    double now = ios_child_now();
+    if (!peb) return 0;
+    pthread_mutex_lock( &ios_child_lock );
+    for (i = 0; i < IOS_CHILD_SLOTS; i++)
+        if (ios_child_slots[i].used && !ios_child_slots[i].noted && ios_child_slots[i].peb == peb)
+        {
+            unsigned at = ios_child_ended_count++ % IOS_CHILD_ENDED;
+            memcpy( ios_child_ended[at].name, ios_child_slots[i].name, sizeof(ios_child_ended[at].name) );
+            memcpy( ios_child_ended[at].path, ios_child_slots[i].path, sizeof(ios_child_ended[at].path) );
+            ios_child_ended[at].started = ios_child_slots[i].started;
+            ios_child_ended[at].ended_at = now;
+            ios_child_ended[at].status = status;
+            ios_child_slots[i].noted = 1;
+            noted = 1;
+            break;
+        }
+    pthread_mutex_unlock( &ios_child_lock );
+    return noted;
 }
 
 /* Children still running that are not helpers, started at most max_age
@@ -503,7 +630,7 @@ int madeira_live_game_children( char *buf, int len, double max_age )
     pthread_mutex_lock( &ios_child_lock );
     for (i = 0; i < IOS_CHILD_SLOTS; i++)
     {
-        if (!ios_child_slots[i].used || ios_child_is_helper( ios_child_slots[i].name )) continue;
+        if (!ios_child_slots[i].used || ios_child_slot_gone( i, now ) || ios_child_is_helper( ios_child_slots[i].name )) continue;
         if (max_age >= 0 && now - ios_child_slots[i].started > max_age) continue;
         count++;
         if (buf && len - used > 1)
@@ -512,6 +639,98 @@ int madeira_live_game_children( char *buf, int len, double max_age )
     }
     pthread_mutex_unlock( &ios_child_lock );
     return count;
+}
+
+/* madeira-bcd (round 577, GTA IV freeze): Wine's own processes. They start with the desktop or the first
+ * program and end with the session; a program that has ended (WineProcessBridge.m "Session end") is not kept
+ * alive by them. Wine's own names, not any game's. */
+static int ios_child_is_system( const char *name )
+{
+    static const char *const names[] = { "explorer.exe", "services.exe", "winedevice.exe", "conhost.exe",
+                                         "plugplay.exe", "rpcss.exe", "svchost.exe", "dockhost.exe" };
+    unsigned i;
+    for (i = 0; i < ARRAY_SIZE(names); i++) if (!strcmp( name, names[i] )) return 1;
+    return 0;
+}
+
+/* How many processes the program started still run, besides Wine's own and the helpers (any age); their file
+ * names go to buf. A child the table could not track counts as running: with an unknown tree the library never
+ * ends a session by itself. Called from LibraryModel.watchProgramEnd (Library.swift) through the bridging header,
+ * as madeira_live_game_children is from WineProcessBridge.m: same binary. */
+int madeira_live_user_processes( char *buf, int len )
+{
+    double now = ios_child_now();
+    int count = 0, used = 0;
+    unsigned i;
+
+    if (buf && len > 0) buf[0] = 0;
+    pthread_mutex_lock( &ios_child_lock );
+    for (i = 0; i < IOS_CHILD_SLOTS; i++)
+    {
+        if (!ios_child_slots[i].used || ios_child_slot_gone( i, now )) continue;
+        if (ios_child_is_helper( ios_child_slots[i].name ) || ios_child_is_system( ios_child_slots[i].name )) continue;
+        count++;
+        if (buf && len - used > 1)
+            used += snprintf( buf + used, len - used, "%s%s", used ? " " : "", ios_child_slots[i].name );
+        if (used >= len) used = len - 1;
+    }
+    if (ios_child_untracked)
+    {
+        count += (int)ios_child_untracked;
+        if (buf && len - used > 1)
+            used += snprintf( buf + used, len - used, "%s(%u untracked)", used ? " " : "", ios_child_untracked );
+        if (used >= len) used = len - 1;
+    }
+    pthread_mutex_unlock( &ios_child_lock );
+    return count;
+}
+
+/* madeira-bcd (round 579, BCD Dock): a text snapshot of this table for the library's game-end watch
+ * (LibraryModel.watchDockGameEnd, DockGameEnd.swift): one line per process, fields separated by tabs, the image path last.
+ *   R <helper> <seconds since start> <path>                              still runs
+ *   E <helper> <status in hex> <seconds since the end> <seconds it lived> <path>   ended (the last IOS_CHILD_ENDED ends)
+ *   U <count>                                                            spawns this table could not track
+ *   T                                                                    the text was cut: the snapshot is incomplete
+ * <helper> is 1 for a crash reporter or helper by the file-name rule above; where a program lives is judged by the
+ * library from its path. Returns the number of process lines. Paths go nowhere else (no log line carries them). */
+int madeira_child_report( char *buf, int len )
+{
+    double now = ios_child_now();
+    int used = 0, lines = 0, cut = 0;
+    unsigned i, first;
+
+    if (!buf || len < 8) return 0;
+    buf[0] = 0;
+    pthread_mutex_lock( &ios_child_lock );
+    for (i = 0; i < IOS_CHILD_SLOTS && !cut; i++)
+    {
+        int room = len - used - 4, n;   /* 4 bytes stay free for the cut mark */
+        if (!ios_child_slots[i].used || ios_child_slots[i].exited) continue;   /* an ended one is in the ring */
+        n = room > 0 ? snprintf( buf + used, room, "R\t%d\t%.1f\t%s\n", ios_child_is_helper( ios_child_slots[i].name ),
+                                 now - ios_child_slots[i].started, ios_child_slots[i].path ) : -1;
+        if (n < 0 || n >= room) { cut = 1; break; }
+        used += n; lines++;
+    }
+    first = ios_child_ended_count > IOS_CHILD_ENDED ? ios_child_ended_count - IOS_CHILD_ENDED : 0;
+    for (i = first; i < ios_child_ended_count && !cut; i++)
+    {
+        int room = len - used - 4, n;
+        unsigned at = i % IOS_CHILD_ENDED;
+        n = room > 0 ? snprintf( buf + used, room, "E\t%d\t%x\t%.1f\t%.1f\t%s\n", ios_child_is_helper( ios_child_ended[at].name ),
+                                 (unsigned)ios_child_ended[at].status, now - ios_child_ended[at].ended_at,
+                                 ios_child_ended[at].ended_at - ios_child_ended[at].started, ios_child_ended[at].path ) : -1;
+        if (n < 0 || n >= room) { cut = 1; break; }
+        used += n; lines++;
+    }
+    if (ios_child_untracked && !cut)
+    {
+        int room = len - used - 4, n = room > 0 ? snprintf( buf + used, room, "U\t%u\n", ios_child_untracked ) : -1;
+        if (n < 0 || n >= room) cut = 1; else used += n;
+    }
+    if (cut) { memcpy( buf + used, "T\n", 3 ); used += 2; }
+    buf[used] = 0;
+    pthread_mutex_unlock( &ios_child_lock );
+    return lines;
 }
 
 /* the machine of the child's main image, published to
@@ -547,6 +766,7 @@ static void *ios_child_thread_entry( void *arg )
     /* Set up exit handling for this child thread */
     wine_ios_main_thread = pthread_self();
     wine_ios_exit_initialized = 1;
+    ios_child_slot_current = args->slot;   /* madeira-bcd (round 577): server_init_process_child binds the PEB to it */
 
     if (setjmp(wine_ios_exit_jmpbuf) == 0) {
         /* Change working directory if requested */
@@ -654,8 +874,14 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
 
     if (winedebug) putenv( winedebug );
 
-    ERR("spawn_process: creating child thread for %s (fd=%d, unixdir=%d, dup_unixdir=%d)\n",
-        debugstr_us(&params->CommandLine), socketfd, unixdir, args->unixdir);
+    /* madeira-bcd (log only): the Windows current directory the child is given. Terraria (Steam 105600, log
+     * YFYT0R, build 576) ended on its own "Asset could not be found: PixelShader" box after its audio engine
+     * (FACT, started from a Content\ file) had come up. Whether the game's relative "Content" lookup runs
+     * against the wrong directory is a question, not a finding: no line of any log said what directory a
+     * Steam-launched child has, and this one does. */
+    ERR("spawn_process: creating child thread for %s (fd=%d, unixdir=%d, dup_unixdir=%d) cwd=%s\n",
+        debugstr_us(&params->CommandLine), socketfd, unixdir, args->unixdir,
+        debugstr_us(&params->CurrentDirectory.DosPath));
 
     ret = pthread_create( &child_thread, NULL, ios_child_thread_entry, args );
     if (ret) {

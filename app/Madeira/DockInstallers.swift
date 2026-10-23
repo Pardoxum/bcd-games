@@ -254,6 +254,7 @@ enum DockInstallStatus: String, Sendable {
     case done          // already recorded in the prefix's registry
     case missing       // the program is not on disk
     case unsupported   // this build cannot run it (see DockInstallers.runnable)
+    case provided      // madeira-bcd: a .NET Framework setup; Wine Mono provides .NET, so it is not run and its record is written
     case pending       // runs in the session before the host
     case limit         // over the per-start limit; runs at a later start
 }
@@ -340,16 +341,19 @@ enum DockInstallScripts {
     }
 
     /// Every program's fate at this start: done first, then whether the program exists,
+    /// madeira-bcd: then whether Wine Mono provides what it installs (`provided`: it is not run),
     /// then whether this build can run it (`runnable` returns the reason it cannot);
     /// at most `limit` programs run per start.
     static func plan(_ found: [SteamInstallProcess], limit: Int = 8,
                      done: (SteamInstallRun) -> Bool, exists: (String) -> Bool,
-                     runnable: (SteamInstallProcess) -> String? = { _ in nil }) -> [DockInstallPlanItem] {
+                     runnable: (SteamInstallProcess) -> String? = { _ in nil },
+                     provided: (SteamInstallProcess) -> Bool = { _ in false }) -> [DockInstallPlanItem] {
         var result: [DockInstallPlanItem] = []
         var queued = 0
         for process in found {
             if done(process.run) { result.append(DockInstallPlanItem(process: process, status: .done)); continue }
             if !exists(process.executable) { result.append(DockInstallPlanItem(process: process, status: .missing)); continue }
+            if provided(process) { result.append(DockInstallPlanItem(process: process, status: .provided)); continue }
             if let reason = runnable(process) {
                 result.append(DockInstallPlanItem(process: process, status: .unsupported, reason: reason)); continue
             }
@@ -374,6 +378,14 @@ enum DockInstallScripts {
         var parts: [String] = []
         if !names(.pending).isEmpty { parts.append("To run: " + names(.pending)) }
         if !names(.done).isEmpty { parts.append("Done earlier: " + names(.done)) }
+        for by in ["Wine Mono", "BCD"] {
+            var seen: [String] = []
+            for item in items where item.status == .provided && provider(item.process) == by {
+                let text = label(item.process.run)
+                if !seen.contains(text) { seen.append(text) }
+            }
+            if !seen.isEmpty { parts.append("Provided by \(by), not run: " + seen.joined(separator: ", ")) }
+        }
         if !names(.missing).isEmpty { parts.append("Installer not found: " + names(.missing)) }
         if !names(.unsupported).isEmpty { parts.append("Not supported by this build: " + names(.unsupported)) }
         if !names(.limit).isEmpty { parts.append("Left for the next start: " + names(.limit)) }
@@ -384,6 +396,53 @@ enum DockInstallScripts {
     /// safe characters.
     static func label(_ run: SteamInstallRun) -> String {
         String(run.name.filter { $0.isLetter || $0.isNumber || $0 == " " || $0 == "." || $0 == "-" || $0 == "_" }.prefix(64))
+    }
+
+    /// madeira-bcd: whether an install-script program is a Microsoft .NET Framework redistributable
+    /// (1.1 to 4.8), by the file name Microsoft gives it: dotnetfx*.exe (DotNetFx35.exe,
+    /// dotNetFx40_Full_setup.exe), NetFx<digit>*.exe (NetFx20SP2_x86.exe) and NDP<digit>*.exe
+    /// (NDP472-KB4054530-x86-x64-AllOS-ENU.exe). The one place a program is told by its name: these
+    /// setups never finished under Wine in the fork's logs (Batman: Arkham City GOTY's DotNetFx35.exe
+    /// stayed open for good, Star Wars: The Clone Wars Republic Heroes' dotnetfx35.exe exited 5100),
+    /// and the runtime they install is Wine Mono's. The modern .NET runtimes (dotnet-runtime-*.exe,
+    /// windowsdesktop-runtime-*.exe) are not Wine Mono's and are not matched.
+    static func isDotNetFramework(_ executable: String) -> Bool {
+        let file = (executable.split(separator: "\\").last.map(String.init) ?? executable).lowercased()
+        guard file.hasSuffix(".exe") else { return false }
+        if file.hasPrefix("dotnetfx") { return true }
+        for prefix in ["netfx", "ndp"] where file.hasPrefix(prefix) {
+            if let next = file.dropFirst(prefix.count).first, next.isASCII, next.isNumber { return true }
+        }
+        return false
+    }
+
+    /// madeira-bcd: whether an install-script program is Microsoft's DirectX End-User Runtime setup, by the file name
+    /// Microsoft gives it: dxsetup.exe (the offline setup: in the fork's logs 12 games carry it, every entry is named
+    /// `directx` and runs DXSETUP.exe, e.g. Saints Row: The Third's `common\Saints Row the Third\DirectX\DXSETUP.exe /silent`)
+    /// and dxwebsetup.exe (its web form, which fetches the same packages). What they install, the D3DX9/10/11, D3DCompiler,
+    /// XAudio2, X3DAudio, XAPOFX and XInput libraries (and XACT for 32-bit programs), BCD ships as Wine's builtin DLLs
+    /// (tools/build-wine-extra-dlls.sh WANT list; app/Madeira/arm64ec-windows and i386-windows). Only a setup that already
+    /// failed once in the game is acted on (DockInstallers.prepare: provided by BCD): a setup that succeeds writes
+    /// Microsoft's own DLLs over the builtins, and nothing proves a game the same without them.
+    static func isDirectXSetup(_ executable: String) -> Bool {
+        let file = (executable.split(separator: "\\").last.map(String.init) ?? executable).lowercased()
+        return file == "dxsetup.exe" || file == "dxwebsetup.exe"
+    }
+
+    /// madeira-bcd: who provides what a plan's provided program would have installed: "BCD" for DirectX's runtime libraries,
+    /// "Wine Mono" for a .NET Framework.
+    static func provider(_ process: SteamInstallProcess) -> String { isDirectXSetup(process.executable) ? "BCD" : "Wine Mono" }
+
+    /// madeira-bcd: the entries whose provided programs are recorded as done at this start (every
+    /// program of the entry is provided or done), and those held back: another program of the same
+    /// entry still has to run, and a record would make the next plan skip it.
+    static func providedRuns(_ items: [DockInstallPlanItem]) -> (record: [SteamInstallRun], held: [SteamInstallRun]) {
+        var record: [SteamInstallRun] = [], held: [SteamInstallRun] = []
+        for run in items.filter({ $0.status == .provided }).map({ $0.process.run }) where !record.contains(run) && !held.contains(run) {
+            let others = items.contains { $0.process.run == run && $0.status != .provided && $0.status != .done }
+            if others { held.append(run) } else { record.append(run) }
+        }
+        return (record, held)
     }
 
     /// The batch the Dock session runs before the host. Each program's start and exit
@@ -420,6 +479,22 @@ enum DockInstallScripts {
         }
         lines.append("echo end" + result)
         return lines.joined(separator: "\r\n") + "\r\n"
+    }
+
+    /// madeira-bcd: a failed program's exit status in the form Windows documents (the batch writes it as a signed
+    /// number: -1073741701 is 0xC000007B) and, for the codes that mean the program could not start, what they mean.
+    /// Empty for a small status (the program's own exit code).
+    static func failureDetail(_ status: Int) -> String {
+        guard status < 0 else { return "" }
+        let code = UInt32(truncatingIfNeeded: status)
+        let hex = "; exit 0x" + String(code, radix: 16, uppercase: true)
+        switch code {
+        case 0xC000007B: return hex + " (STATUS_INVALID_IMAGE_FORMAT: the loader refused the program or one of its DLLs as a wrong kind of image, e.g. 32-bit against 64-bit)"
+        case 0xC0000135: return hex + " (STATUS_DLL_NOT_FOUND: a DLL the program needs was not found)"
+        case 0xC0000139: return hex + " (STATUS_ENTRYPOINT_NOT_FOUND: a DLL lacks a function the program imports)"
+        case 0xC0000142: return hex + " (STATUS_DLL_INIT_FAILED: a DLL refused to start)"
+        default: return hex
+        }
     }
 
     /// A result file read back: programs in the batch, which started (index -> label),
@@ -494,6 +569,18 @@ struct DockInstallLedger: Codable, Equatable, Sendable {
     /// App ID -> the request its next Dock start applies (DockInstallers.applyRequest), by raw
     /// value: a value this build does not know reads as no request instead of a damaged file.
     var requests: [String: String]? = nil
+    /// madeira-bcd: App ID -> entry names whose program ended a batch with a failing exit status and is not recorded
+    /// (absorbResults). Only a DirectX setup acts on it (DockInstallers.prepare: provided by BCD); the others are kept
+    /// for the log. Optional, like the fields above.
+    var failed: [String: [String]]? = nil
+    /// madeira-bcd: App ID -> why the game's choice is Skip, for the log (`choice=skip ... why=`): `picked` (the user
+    /// picked it), `install-start` (a start that runs installs turned it, its session not read yet), then what that
+    /// session came to once read: `ok`, `failed`, `unfinished`, `incomplete`, `nothing-ran`. Absent: set before this
+    /// field existed. Optional.
+    var skipWhy: [String: String]? = nil
+    /// madeira-bcd: App IDs whose installs were offered once more after a session in which nothing ran (settleChoice);
+    /// kept until the installs are tried or the user picks a choice, so the offer is made once and cannot loop.
+    var offeredAgain: [String]? = nil
 
     static func load(prefix: URL) -> DockInstallLedger {
         let file = prefix.appendingPathComponent(fileName)
@@ -511,6 +598,8 @@ struct DockInstallLedger: Codable, Equatable, Sendable {
         return DockInstallRequest(rawValue: raw)
     }
     func unfinishedRuns(_ appID: Int) -> [String] { unfinished?[String(appID)] ?? [] }
+    func failedRuns(_ appID: Int) -> [String] { failed?[String(appID)] ?? [] }
+    func whySkip(_ appID: Int) -> String? { skipWhy?[String(appID)] }
 
     /// Sets or clears a game's request; an empty map is stored as absent.
     mutating func setRequest(_ appID: Int, _ request: DockInstallRequest?) {
@@ -525,6 +614,63 @@ struct DockInstallLedger: Codable, Equatable, Sendable {
         map[String(appID)] = names.isEmpty ? nil : names
         unfinished = map.isEmpty ? nil : map
     }
+
+    /// madeira-bcd: sets or clears a game's failed entries; an empty map is stored as absent.
+    mutating func setFailed(_ appID: Int, _ names: [String]) {
+        var map = failed ?? [:]
+        map[String(appID)] = names.isEmpty ? nil : names
+        failed = map.isEmpty ? nil : map
+    }
+
+    /// madeira-bcd: sets (nil: clears) why a game's choice is Skip; an empty map is stored as absent.
+    mutating func setSkipWhy(_ appID: Int, _ why: String?) {
+        var map = skipWhy ?? [:]
+        map[String(appID)] = why
+        skipWhy = map.isEmpty ? nil : map
+    }
+
+    /// madeira-bcd: a game's choice was set from outside a session (the user's pick, a Reset): nothing the last install
+    /// session did to it counts any more, and a later session starts its own cycle (one more offer).
+    mutating func forgetChoiceHistory(_ appID: Int) {
+        setSkipWhy(appID, nil)
+        if let list = offeredAgain, list.contains(String(appID)) {
+            let rest = list.filter { $0 != String(appID) }
+            offeredAgain = rest.isEmpty ? nil : rest
+        }
+    }
+
+    /// madeira-bcd: what a game's choice does once the session that turned it to Skip has been read (absorbResults).
+    /// A start that runs installs turns the choice to Skip when it plans them, before anything runs; if the session then
+    /// never got to start a single program (the app was closed first, the session failed to boot), nothing was tried and
+    /// the programs would be skipped from then on (Halo: The Master Chief Collection, VJSK5K: "the batch did not start",
+    /// then `choice=skip pending=1`). That is the one case turned back to Run, once. A program that failed or never
+    /// finished stays skipped (the stall hint and the restart alert say so), and so does a choice the user made after the
+    /// session. Returns whether the programs are offered again. `retry` false: the old behaviour, only the reason is kept.
+    mutating func settleChoice(_ appID: Int, after outcome: DockSessionOutcome, retry: Bool) -> Bool {
+        let key = String(appID)
+        guard skipWhy?[key] == "install-start" else { return false }
+        if outcome == .nothingRan, retry, runNext[key] == false, !(offeredAgain ?? []).contains(key) {
+            runNext[key] = nil
+            setSkipWhy(appID, nil)
+            offeredAgain = (offeredAgain ?? []) + [key]
+            return true
+        }
+        setSkipWhy(appID, outcome.rawValue)
+        if outcome != .nothingRan, let list = offeredAgain, list.contains(key) {
+            let rest = list.filter { $0 != key }
+            offeredAgain = rest.isEmpty ? nil : rest
+        }
+        return false
+    }
+}
+
+/// madeira-bcd: what a finished or abandoned batch came to, read from its result file (absorbResults).
+enum DockSessionOutcome: String, Sendable {
+    case nothingRan = "nothing-ran"   // no program started and none exited (no result file, or only its first lines)
+    case failed                       // a program exited with a failing status
+    case unfinished                   // a program started and never exited
+    case incomplete                   // none failed or hung, but some never started
+    case ok                           // every program exited with a success status
 }
 
 // MARK: - A Dock start's one-time installs
@@ -542,6 +688,15 @@ struct DockInstallLedger: Codable, Equatable, Sendable {
 /// - `MADEIRA_DOCK_INSTALL_SERVER_SYNC`: a start that runs installers turns madsync off for
 ///   its session (off: madsync stays and the service-manager step is left out).
 /// - `MADEIRA_DOTNET_FUSION`: place Wine's fusion.dll in the .NET 2.0 folder when missing.
+/// - `MADEIRA_DOCK_DOTNET_MONO` (madeira-bcd): a .NET Framework setup of an install script is not run
+///   (off: it runs as before); with Wine Mono on this device its record is written as a finished
+///   run's, without it the program waits until Wine Mono is downloaded (Settings › .NET Framework).
+/// - `MADEIRA_DOCK_DIRECTX_PROVIDED` (madeira-bcd): a DirectX setup that already failed once in a game is not run
+///   again; BCD ships the DirectX runtime libraries itself, so its record is written like a finished run's
+///   (off: it stays pending, as before). A DirectX setup that succeeds is never touched.
+/// - `MADEIRA_DOCK_INSTALL_RETRY` (madeira-bcd): installs whose session never started a single program (the app was
+///   closed first, the session failed to boot) are offered once more at the next start instead of being skipped for good
+///   (off: they are skipped, as before). A program that failed or never finished stays skipped.
 /// - `MADEIRA_DOCK_INSTALL_SEPARATE` (madeira-bcd): a start that runs installers runs only
 ///   them; the game starts after Madeira is restarted (off: the host follows in the same session).
 /// - `MADEIRA_DOCK_RESET_CLEAN` (madeira-bcd): Reset also moves what the installers put into
@@ -571,6 +726,9 @@ enum DockInstallers {
     /// other lines stay (the Rockstar Service install needs env.MADEIRA_EXECREQ_LEAVE).
     nonisolated static let installSessionDroppedKeys: Set<String> = ["env.MADEIRA_SC_PA_POOLS", "env.MADEIRA_RDR2_VA_HOLD"]
 
+    /// madeira-bcd: why a .NET Framework setup is held back on a device without Wine Mono (the note and the log).
+    nonisolated static let dotNetNeedsMono = "needs Wine Mono; download it in Settings › .NET Framework"
+
     /// madeira-bcd: for a session of one-time installs (the app sets MADEIRA_DOCK_INSTALLS_SESSION),
     /// the game's config file (MADEIRA_CFG_GAME) is replaced by a copy without
     /// `installSessionDroppedKeys`. Returns the keys left out. MADEIRA_DOCK_INSTALL_LAYOUT=0 keeps
@@ -598,6 +756,15 @@ enum DockInstallers {
         setenv("MADEIRA_CFG_GAME", copy.path, 1)
         return dropped
     }
+    /// This start's batch, in batch order (the result lines refer to a program by its place): poll names a failed
+    /// program's file type from it. Empty for a start without installs.
+    private static var sessionPrograms: [SteamInstallProcess] = []
+    /// This start turned the game's choice to Skip (it runs pending programs): they are not run again at the next
+    /// start, a failed one included. The restart alert says so.
+    private(set) static var skipsNextStart = false
+    /// madeira-bcd: a DirectX setup of this start's batch exited with a failing status (poll): the restart alert says BCD
+    /// provides the DirectX runtime libraries itself.
+    private(set) static var failedDirectX = false
     /// This start runs installers and turns madsync off for its session.
     private(set) static var serverSync = false
     /// This start's plan in words (the Dock sheet's status), nil when there is nothing to say.
@@ -694,6 +861,13 @@ enum DockInstallers {
         return UInt16(header[4]) | UInt16(header[5]) << 8
     }
 
+    /// madeira-bcd: a program's PE machine for the log: "0x8664" (x64), "0x14c" (32-bit), "0xaa64" (ARM64), "-" when
+    /// the file cannot be found or read.
+    nonisolated static func machineText(_ process: SteamInstallProcess, drive: URL) -> String {
+        guard let file = resolve(process.executable, drive: drive), let machine = machine(file) else { return "-" }
+        return "0x" + String(machine, radix: 16)
+    }
+
     /// Why this build cannot run a program, nil when it can. Decided by what the program is
     /// (a Windows Installer package, a 32-bit executable) and what the bundle has, never by
     /// its name: a package needs msiexec.exe, a 32-bit executable needs 32-bit support.
@@ -719,6 +893,9 @@ enum DockInstallers {
     static func setRunsNext(_ appID: Int, _ run: Bool, prefix: URL) {
         var ledger = DockInstallLedger.load(prefix: prefix)
         ledger.runNext[String(appID)] = run ? nil : false
+        // madeira-bcd: a choice made here is the user's, not an install session's (settleChoice leaves it alone).
+        ledger.forgetChoiceHistory(appID)
+        if !run { ledger.setSkipWhy(appID, "picked") }
         do { try ledger.save(prefix: prefix) }
         catch { LogStore.shared.log("[dock-installers] app=\(appID) choice not saved: \(error.localizedDescription)", level: .error); return }
         LogStore.shared.log("[dock-installers] app=\(appID) choice=\(run ? "run" : "skip")")
@@ -781,6 +958,8 @@ enum DockInstallers {
             do { changed = try SteamInstallScripts.unmark(runs, prefix: prefix) } catch { failure = error.localizedDescription }
             if failure == nil {
                 ledger.runNext[String(app)] = nil
+                // madeira-bcd: a clean start for these installs: no earlier failure, no earlier reason for Skip.
+                ledger.setFailed(app, []); ledger.forgetChoiceHistory(app)
                 if cleaned != nil {
                     alsoRun = shareReset(app, runs: runs, found: found, others: others, drive: drive, prefix: prefix, ledger: &ledger)
                 }
@@ -843,6 +1022,7 @@ enum DockInstallers {
                 continue
             }
             ledger.runNext[String(other.id)] = nil
+            ledger.setFailed(other.id, []); ledger.forgetChoiceHistory(other.id)
             result.append("app=\(other.id) programs=\(shared.map { DockInstallScripts.label($0) }.joined(separator: ",")) values=\(removed)")
         }
         return result
@@ -855,13 +1035,14 @@ enum DockInstallers {
     /// `others`: the prefix's other Dock games (a reset's shared installs, applyRequest).
     static func prepare(_ game: DockGame, drive: URL, prefix: URL, others: [DockGame] = [],
                         has32Bit: Bool = DockInstallers.bundleHas32Bit, hasMsiexec: Bool = DockInstallers.bundleHasMsiexec,
+                        hasWineMono: Bool = WineMonoModel.available,
                         fusionSource: URL? = Bundle.main.resourceURL?.appendingPathComponent("i386-windows/fusion.dll")) {
         script = nil; serverSync = false; note = nil; finishedAt = nil; logged = []; runningSince = nil; installsOnly = false
-        allSucceeded = false
+        allSucceeded = false; sessionPrograms = []; skipsNextStart = false; failedDirectX = false
         let app = game.id
         let batchFile = drive.appendingPathComponent(scriptName)
         try? FileManager.default.removeItem(at: batchFile)
-        absorbResults(reason: "next-start", drive: drive, prefix: prefix)
+        let offeredAgain = absorbResults(reason: "next-start", drive: drive, prefix: prefix)
         try? FileManager.default.removeItem(at: drive.appendingPathComponent(resultName))
         // madeira-bcd: a Vulkan loader an installer wrote into system32 goes back out, so the
         // session links Madeira's stand-in (DockReset.restoreStandIn).
@@ -885,12 +1066,37 @@ enum DockInstallers {
         let registry = [SteamInstallRun.Hive.machine: "system.reg", .user: "user.reg"].mapValues {
             (try? String(contentsOf: prefix.appendingPathComponent($0), encoding: .utf8)) ?? ""
         }
+        // madeira-bcd: a .NET Framework setup never finished under Wine (ajan6-dotnet: Batman: Arkham City GOTY's .NET 3.5
+        // setup stayed open in builds 574 and 576, Star Wars: The Clone Wars Republic Heroes' exited 5100), and Wine Mono
+        // is the runtime the game uses; the prefix template already carries Wine's NDP markers (v1.1 to v4 Full). With
+        // Wine Mono the program is not run and its record is written; without it the program waits for Settings › .NET Framework.
+        let dotNetMono = flag("MADEIRA_DOCK_DOTNET_MONO")   // 0: these setups run as before
+        var ledger = DockInstallLedger.load(prefix: prefix)
+        // madeira-bcd: a DirectX setup that already failed once in this game (absorbResults kept its entry name) is not run
+        // again: BCD ships what it installs (D3DX9/10/11, D3DCompiler, XAudio2, X3DAudio, XAPOFX, XInput) as Wine's builtin
+        // DLLs, so its record is written like a finished run's. One that succeeded is `done` and never gets here; one that
+        // never failed here (first run, a hung or never-started one) is planned as before. The setup failed in the fork's logs
+        // with 6, -9 and 0xC0000018 (infinst.exe of Saints Row: The Third, T3P8HK) and exited 0 in Just Cause 2 (JYFG4D).
+        let directXProvided = flag("MADEIRA_DOCK_DIRECTX_PROVIDED")   // 0: a failed DirectX setup stays pending, as before
+        let failedBefore = Set(ledger.failedRuns(app))
         let items = DockInstallScripts.plan(found,
                                             done: { DockInstallScripts.marked($0, in: registry[$0.hive] ?? "") },
                                             exists: { resolve($0, drive: drive) != nil },
-                                            runnable: { runnable($0, drive: drive, has32Bit: has32Bit, hasMsiexec: hasMsiexec) })
+                                            runnable: {
+                                                if dotNetMono, !hasWineMono, DockInstallScripts.isDotNetFramework($0.executable) { return dotNetNeedsMono }
+                                                return runnable($0, drive: drive, has32Bit: has32Bit, hasMsiexec: hasMsiexec)
+                                            },
+                                            provided: {
+                                                (dotNetMono && hasWineMono && DockInstallScripts.isDotNetFramework($0.executable))
+                                                    || (directXProvided && DockInstallScripts.isDirectXSetup($0.executable) && failedBefore.contains($0.run.name))
+                                            })
+        let providedRuns = DockInstallScripts.providedRuns(items)
+        var providedWritten = 0
+        if !providedRuns.record.isEmpty {
+            do { providedWritten = try SteamInstallScripts.mark(providedRuns.record, prefix: prefix) }
+            catch { LogStore.shared.log("[dock-installers] app=\(app) records of the programs Wine Mono or BCD provides not written: \(error.localizedDescription)", level: .error) }
+        }
         var pending = items.filter { $0.status == .pending }.map(\.process)
-        var ledger = DockInstallLedger.load(prefix: prefix)
         // Programs the game's last batch started but never saw exit (absorbResults).
         let unfinished = Set(ledger.unfinishedRuns(app))
         // The game's One-time installs choice: absent or "Run at next start" runs the pending
@@ -898,11 +1104,17 @@ enum DockInstallers {
         // later start); Skip starts the game without them. MADEIRA_DOCK_INSTALL_CHOICE=0 ignores it.
         let choiceOn = flag("MADEIRA_DOCK_INSTALL_CHOICE")
         let skipped = choiceOn && !ledger.runsNext(app) && !pending.isEmpty
+        var turnedToSkip = false
         if skipped {
-            LogStore.shared.log("[dock-installers] app=\(app) choice=skip pending=\(pending.count)")
+            // madeira-bcd: `why=` says how the choice came to be Skip (DockInstallLedger.skipWhy); GTA V Legacy's logs
+            // (P36E54, YFYGD4, BT9TE3, 0DHNMC) showed `choice=skip pending=2` with nothing to say which start set it.
+            LogStore.shared.log("[dock-installers] app=\(app) choice=skip pending=\(pending.count) why=\(ledger.whySkip(app) ?? "unknown")")
             pending = []
         } else if choiceOn && !pending.isEmpty && !items.contains(where: { $0.status == .limit }) {
             ledger.runNext[String(app)] = false
+            ledger.setSkipWhy(app, "install-start")
+            turnedToSkip = true
+            skipsNextStart = true
             LogStore.shared.log("[dock-installers] app=\(app) choice=run pending=\(pending.count); the next start skips them")
         }
         // Installers expect a service manager, and a Dock session starts none before the
@@ -924,9 +1136,21 @@ enum DockInstallers {
                 installsOnly = flag("MADEIRA_DOCK_INSTALL_SEPARATE")   // 0: the host follows the installers in the same session
             } catch {
                 LogStore.shared.log("[dock-installers] app=\(app) batch not written: \(error.localizedDescription)", level: .error)
+                // madeira-bcd: nothing will run, so the choice this start turned to Skip goes back: the programs are not
+                // skipped for good by a batch that was never there.
+                if turnedToSkip && flag("MADEIRA_DOCK_INSTALL_RETRY") {
+                    ledger.runNext[String(app)] = nil; ledger.setSkipWhy(app, nil); skipsNextStart = false
+                    LogStore.shared.log("[dock-installers] app=\(app) choice=run again: the batch was not written, so nothing is skipped")
+                }
             }
         }
+        // madeira-bcd: an entry recorded as provided is no longer "not finished" (an earlier build ran its installer and never saw it exit).
+        let providedNames = Set(providedRuns.record.map(\.name))
+        if !providedNames.isDisjoint(with: unfinished) {
+            ledger.setUnfinished(app, ledger.unfinishedRuns(app).filter { !providedNames.contains($0) })
+        }
         ledger.session = script != nil ? pending.map(\.run) : []
+        sessionPrograms = script != nil ? pending : []
         ledger.sessionApp = ledger.session.isEmpty ? 0 : app
         do { try ledger.save(prefix: prefix) }
         catch { LogStore.shared.log("[dock-installers] app=\(app) ledger not saved: \(error.localizedDescription)", level: .error) }
@@ -937,7 +1161,27 @@ enum DockInstallers {
             let lastRun: String = item.status != .done && unfinished.contains(run.name) ? " last-run=unfinished" : ""
             LogStore.shared.log("[dock-installers] app=\(app) program=\(DockInstallScripts.label(run)) file=\(file) " +
                                 "status=\(item.status.rawValue)\(item.reason.map { " reason=" + $0.replacingOccurrences(of: " ", with: "-") } ?? "") " +
-                                "key=\(run.hive == .machine ? "HKLM" : "HKCU")\\\(run.key) recorded=\(recorded) minimum=\(run.value)\(lastRun)")
+                                "key=\(run.hive == .machine ? "HKLM" : "HKCU")\\\(run.key) recorded=\(recorded) minimum=\(run.value)\(lastRun) " +
+                                "machine=\(machineText(item.process, drive: drive))")
+        }
+        for item in items where item.status == .provided || (item.status == .unsupported && item.reason == dotNetNeedsMono) {
+            let run = item.process.run
+            let file = item.process.executable.split(separator: "\\").last.map(String.init) ?? ""
+            if item.status == .provided {
+                let recorded = providedRuns.held.contains(run) ? "no, another program of this entry still has to run"
+                    : providedWritten > 0 ? "yes, \(providedWritten) values" : "no values written (the prefix's registry is not seeded yet)"
+                if DockInstallScripts.provider(item.process) == "BCD" {
+                    LogStore.shared.log("[dock-installers] app=\(app) program=\(DockInstallScripts.label(run)) skipped: provided by BCD; " +
+                                        "file=\(file) is DirectX's runtime setup, it failed in this game before, and BCD ships what it installs " +
+                                        "(D3DX9/10/11, D3DCompiler, XAudio2, X3DAudio, XAPOFX, XInput) as Wine's builtin DLLs; record: \(recorded)")
+                } else {
+                    LogStore.shared.log("[dock-installers] app=\(app) program=\(DockInstallScripts.label(run)) skipped: provided by Wine Mono; " +
+                                        "file=\(file) is a .NET Framework setup, which does not finish under Wine, and the prefix already carries Wine's NDP markers; record: \(recorded)")
+                }
+            } else {
+                LogStore.shared.log("[dock-installers] app=\(app) program=\(DockInstallScripts.label(run)) skipped: file=\(file) is a .NET Framework setup and this device has no Wine Mono; " +
+                                    "Settings › .NET Framework downloads it, and the program is recorded at the start after that")
+            }
         }
         if skipped {
             note = "The one-time installs were skipped this time. To have them run, pick Run at next start under One-time installs."
@@ -948,11 +1192,15 @@ enum DockInstallers {
             } else if serverSync && madsyncConfigured {
                 note = (note.map { $0 + " " } ?? "") + "For this start, Wine's standard synchronization replaces madsync; madsync is back at the next start."
             }
+            // madeira-bcd: the last install session never started a program; they are offered once more (settleChoice).
+            if offeredAgain && script != nil {
+                note = "The one-time installs did not get to start last time, so they run now. " + (note ?? "")
+            }
         }
         // Those still not recorded and not run again now are named in the note, so an
         // installer that did its work but never closed can be recorded with Record as done.
         let stillUnfinished = items.filter { item in
-            item.status != .done && unfinished.contains(item.process.run.name) && !pending.contains(item.process)
+            item.status != .done && item.status != .provided && unfinished.contains(item.process.run.name) && !pending.contains(item.process)
         }.map { DockInstallScripts.label($0.process.run) }
         if !stillUnfinished.isEmpty {
             let names = stillUnfinished.joined(separator: ", ")
@@ -965,7 +1213,7 @@ enum DockInstallers {
         }
         LogStore.shared.log("[dock-installers] app=\(app) scripts=\(scripts) programs=\(found.count) pending=\(pending.count) " +
                             "done=\(items.filter { $0.status == .done }.count) missing=\(items.filter { $0.status == .missing }.count) " +
-                            "unsupported=\(items.filter { $0.status == .unsupported }.count) default-key=\(defaultKey ? 1 : 0) " +
+                            "unsupported=\(items.filter { $0.status == .unsupported }.count) provided=\(items.filter { $0.status == .provided }.count) default-key=\(defaultKey ? 1 : 0) " +
                             "services-step=\(script == nil ? "-" : services == .off ? "off" : "start") session-madsync-off=\(serverSync ? 1 : 0) " +
                             "installs-only=\(installsOnly ? 1 : 0)")
         if installsOnly {
@@ -994,20 +1242,27 @@ enum DockInstallers {
     /// The previous batch's exit statuses, read at the next Dock start (no session runs, so
     /// the registry is on disk): programs that succeeded are recorded done, one summary line
     /// is logged, and the result file and session list are cleared.
-    static func absorbResults(reason: String, drive: URL, prefix: URL) {
+    /// madeira-bcd: the programs that exited with a failing status are kept in the ledger (a DirectX setup among them is
+    /// provided by BCD from now on), and a session in which no program started is offered once more (settleChoice).
+    /// Returns whether the game's installs are offered again.
+    @discardableResult
+    static func absorbResults(reason: String, drive: URL, prefix: URL) -> Bool {
         var ledger = DockInstallLedger.load(prefix: prefix)
-        guard !ledger.session.isEmpty else { return }
+        guard !ledger.session.isEmpty else { return false }
         let app = ledger.sessionApp
         let file = drive.appendingPathComponent(resultName)
+        var outcome = DockSessionOutcome.nothingRan
         if let contents = try? Data(contentsOf: file), contents.count <= 16384 {
             let results = DockInstallScripts.results(String(decoding: contents, as: UTF8.self))
             var succeeded: [SteamInstallRun] = []
             var statuses: [String] = []
             var unfinished: [String] = []
+            var failedNames = Set(ledger.failedRuns(app))
             for (offset, run) in ledger.session.enumerated() {
                 let index = offset + 1, text = DockInstallScripts.label(run)
                 if let status = results.exits[index] {
-                    if DockInstallScripts.Results.succeeded(status) { succeeded.append(run) }
+                    if DockInstallScripts.Results.succeeded(status) { succeeded.append(run); failedNames.remove(run.name) }
+                    else { failedNames.insert(run.name) }
                     statuses.append("\(text)=\(status)")
                 } else {
                     if results.started[index] != nil { unfinished.append(run.name) }
@@ -1017,6 +1272,7 @@ enum DockInstallers {
             // Kept until the game's next batch or request: the Dock note names them, and
             // Record as done can record one whose installer did its work but never closed.
             ledger.setUnfinished(app, unfinished)
+            ledger.setFailed(app, failedNames.sorted())
             var written = 0
             do { written = try SteamInstallScripts.mark(succeeded, prefix: prefix) }
             catch { LogStore.shared.log("[dock-installers] app=\(app) results not recorded: \(error.localizedDescription)", level: .error) }
@@ -1024,12 +1280,24 @@ enum DockInstallers {
             LogStore.shared.log("[dock-installers] app=\(app) results reason=\(reason) succeeded=\(succeeded.count) failed=\(failed) " +
                                 "recorded-values=\(written) services=\(results.services ?? "-") ended=\(results.ended ? 1 : 0) " +
                                 "statuses=\(statuses.joined(separator: ","))", level: failed > 0 ? .error : .info)
+            if results.started.isEmpty && results.exits.isEmpty { outcome = .nothingRan }
+            else if !unfinished.isEmpty { outcome = .unfinished }
+            else if results.exits.contains(where: { !DockInstallScripts.Results.succeeded($0.value) }) { outcome = .failed }
+            else { outcome = succeeded.count == ledger.session.count ? .ok : .incomplete }
         } else {
             LogStore.shared.log("[dock-installers] app=\(app) results reason=\(reason) none: the batch did not start", level: .error)
+        }
+        // madeira-bcd: a session that never started a program leaves the programs unrecorded and the choice at Skip, which
+        // would skip them for good (Halo: The Master Chief Collection, VJSK5K L40-45). Once, they are offered again.
+        let offered = ledger.settleChoice(app, after: outcome, retry: flag("MADEIRA_DOCK_INSTALL_RETRY"))
+        if offered {
+            LogStore.shared.log("[dock-installers] app=\(app) choice=run again: the last session never started a program, so nothing was tried; " +
+                                "the installs are offered once more (MADEIRA_DOCK_INSTALL_RETRY=0 skips them as before)")
         }
         try? FileManager.default.removeItem(at: file)
         ledger.session = []; ledger.sessionApp = 0
         try? ledger.save(prefix: prefix)
+        return offered
     }
 
     /// The batch's progress from its result file, for the Dock sheet and the starting
@@ -1052,9 +1320,17 @@ enum DockInstallers {
         for (index, status) in results.exits.sorted(by: { $0.key < $1.key }) {
             let ok = DockInstallScripts.Results.succeeded(status)
             if !ok { failed.append("\(results.started[index] ?? "#\(index)") (exit \(status))") }
+            if !ok, index >= 1, index <= sessionPrograms.count, DockInstallScripts.isDirectXSetup(sessionPrograms[index - 1].executable) { failedDirectX = true }
             guard logged.insert("e\(index)").inserted else { continue }
+            var detail = ""
+            if !ok {
+                // madeira-bcd: what the status means and what kind of program it was (an installer that cannot start
+                // gives the log nothing else: Monster Hunter Stories 3 Trial, InstallerMessage.exe, exit -1073741701).
+                detail = DockInstallScripts.failureDetail(status)
+                if index >= 1, index <= sessionPrograms.count { detail += "; machine=" + machineText(sessionPrograms[index - 1], drive: drive) }
+            }
             LogStore.shared.log("[dock-installers] exit \(index)/\(results.total) program=\(results.started[index] ?? "") status=\(status) " +
-                                (ok ? "succeeded; recorded at the next start" : "failed; not recorded"), level: ok ? .info : .error)
+                                (ok ? "succeeded; recorded at the next start" : "failed; not recorded" + detail), level: ok ? .info : .error)
         }
         let failures = failed.isEmpty ? "" : "\nFailed: " + failed.joined(separator: ", ")
         if let running = results.running {
@@ -1063,7 +1339,10 @@ enum DockInstallers {
             let program = results.started[running] ?? ""
             var text = "One-time install \(running) of \(max(results.total, running)): \(program) is running…"
             if seconds >= stallSeconds {
-                let hint = "If its window has stopped changing, the installer may be done but still open. Closing the session now leaves it unrecorded; Record as done under One-time installs can record it afterwards."
+                var hint = "If its window has stopped changing, the installer may be done but still open. Closing the session now leaves it unrecorded; Record as done under One-time installs can record it afterwards."
+                // madeira-bcd: the way out of an installer that never finishes. This start turned the choice to Skip,
+                // so after a restart the game starts without the installs (Arkham City's .NET 3.5 setup, builds 574 and 576).
+                if skipsNextStart { hint += " If it never finishes, close BCD (swipe it away in the app switcher) and open it again: the next start skips the installs and starts the game." }
                 text += " (\(seconds / 60) min)\n" + hint
                 if logged.insert("stall\(running)").inserted {
                     let line = "[dock-installers] still running \(running)/\(results.total) program=\(program) after \(seconds) s; the host waits for it (an installer window that never closes keeps the batch here)"
@@ -1091,6 +1370,234 @@ enum DockInstallers {
     /// is poll's text, nil when the batch never ended.
     static func restartNotice(_ ended: String?) -> String {
         if allSucceeded { return "One-time installs completed successfully. Close BCD and open it again to play the game." }
-        return (ended ?? "The session for the one-time installs has ended.") + "\nClose BCD and open it again to play the game."
+        var text = ended ?? "The session for the one-time installs has ended."
+        // madeira-bcd: a program that failed is not run again (the choice is Skip now): say so, and how to try it again.
+        if skipsNextStart, text.contains("\nFailed: ") {
+            text += "\nA program that failed is not run again: the game starts without it at the next start. To try it again, pick Run at next start under One-time installs."
+        }
+        // madeira-bcd: DirectX's setup is not needed here: its record is written at the next start (MADEIRA_DOCK_DIRECTX_PROVIDED).
+        if failedDirectX, flag("MADEIRA_DOCK_DIRECTX_PROVIDED"), text.contains("\nFailed: ") {
+            text += "\nDirectX's setup is not needed: BCD ships the DirectX runtime libraries (D3DX, XAudio2, XInput, D3DCompiler) itself. The game starts without it, and it is recorded as provided at this game's next start. Reset under One-time installs would run it again."
+        }
+        return text + "\nClose BCD and open it again to play the game."
+    }
+}
+
+// MARK: - Valve's client service for a custom-executable (CEG) start
+
+/// madeira-bcd (round 578, ajan6/ceg): Valve's "Steam Client Service" is installed before a
+/// custom-executable (CEG) start, with Valve's own files, as Windows has it.
+///
+/// Valve's client prepares a CEG game's per-user executable through its Windows service
+/// (`SteamService.exe /RunAsService`, demand start), which Windows' Steam installs once with
+/// admin rights (`SteamService.exe /install`: it copies itself to `Common Files\Steam` and
+/// creates the service there). The Dock host looks for the service, and when it is missing runs
+/// that same installer in the session (madeira-dock src/scm.c). The installer is a 32-bit
+/// program, and in 3 of 5 logged sessions it failed on an RPC to Wine's service manager
+/// ("RpcAssoc_BindConnection receive failed with error 1726", exit 1); in two of them it was
+/// the first call ("Failed to open service control manager") and the host ended with
+/// ceg-result -5 (JYFG4D, build 574; the CoD Black Ops session before codbo-cur, build 576).
+/// The 64-bit host's own calls to the same service manager worked every time.
+///
+/// So the service is already there when the session starts: the file Valve's installer would
+/// copy (Valve's own `bin\SteamService.exe`, byte for byte, never over an existing file) and
+/// the service's registry key with the values the installer's CreateService call passed
+/// (own-process type 0x10, demand start 3, error control 1, the 32-bit client's WOW64 mark,
+/// image path `"C:\Program Files (x86)\Common Files\Steam\SteamService.exe" /RunAsService`).
+/// Wine's services.exe loads the key when it starts; Valve's client starts the service through
+/// the service manager exactly as it did after Valve's installer had run. Nothing is written
+/// while a session runs, nothing for a game without per-user executables, and when the file
+/// cannot be placed the key is not written either (the host's own installer step is then all
+/// there is, as before). The Dock host still checks and would still run Valve's installer.
+///
+/// `MADEIRA_DOCK_CEG_SERVICE` (on): `0` leaves Valve's service alone (no key, no file, no
+/// Steam log lines after a failed CEG start).
+@MainActor
+enum DockCEGService {
+    nonisolated static let serviceName = "Steam Client Service"
+    /// What Valve's installer registers: its own copy under Common Files.
+    nonisolated static let installedImage = "C:\\Program Files (x86)\\Common Files\\Steam\\SteamService.exe"
+    nonisolated static let imagePath = "\"" + installedImage + "\" /RunAsService"
+    /// Valve's installer, in the client's own folder (the Steam client package ships it).
+    nonisolated static let installerImage = "C:\\Program Files (x86)\\Steam\\bin\\SteamService.exe"
+    /// Wine writes services under the control set CurrentControlSet points to.
+    nonisolated static let registryKey = "System\\ControlSet001\\Services\\Steam Client Service"
+
+    /// Whether system.reg's text already has the service's key (either way Wine names the
+    /// control set; sub-keys do not count).
+    nonisolated static func registered(in text: String) -> Bool {
+        let pattern = #"^\[System\\\\(?:ControlSet\d+|CurrentControlSet)\\\\Services\\\\Steam Client Service\]"#
+        guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .anchorsMatchLines]) else { return false }
+        return expression.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
+    /// The registry text of the service's key, in the form Wine's wineserver writes it (the
+    /// values services.exe saves for a service a 32-bit client created).
+    nonisolated static func section(now: Int) -> [String] {
+        let escape = SteamInstallScripts.escape
+        return ["[" + escape(registryKey) + "] \(now)",
+                "\"DisplayName\"=\"" + escape(serviceName) + "\"",
+                "\"ErrorControl\"=dword:00000001",
+                "\"ImagePath\"=str(2):\"" + escape(imagePath) + "\"",
+                "\"ObjectName\"=\"LocalSystem\"",
+                "\"PreshutdownTimeout\"=dword:0002bf20",
+                "\"Start\"=dword:00000003",
+                "\"Type\"=dword:00000010",
+                "\"WOW64\"=dword:00000001"]
+    }
+
+    /// system.reg's text with the service's key added; unchanged when it is there already or
+    /// the text is not a Wine registry file.
+    nonisolated static func register(in text: String, now: Int) -> (text: String, added: Bool) {
+        guard text.hasPrefix("WINE REGISTRY Version 2"), !registered(in: text) else { return (text, false) }
+        var lines = text.components(separatedBy: "\n")
+        while let last = lines.last, last.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { lines.removeLast() }
+        lines += [""] + section(now: now) + [""]
+        return (lines.joined(separator: "\n"), true)
+    }
+
+    /// A folder of C:\ by its path parts, matched the way Wine matches names (case-insensitive)
+    /// and created when it does not exist; nil if it would leave drive_c.
+    private nonisolated static func folder(_ parts: [String], drive: URL) -> URL? {
+        let fm = FileManager.default
+        var current = drive
+        for part in parts {
+            let names = (try? fm.contentsOfDirectory(atPath: current.path)) ?? []
+            let match = names.first(where: { $0 == part }) ?? names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame })
+            current = current.appendingPathComponent(match ?? part, isDirectory: true)
+            if match == nil { guard (try? fm.createDirectory(at: current, withIntermediateDirectories: false)) != nil else { return nil } }
+            guard DockInstallers.inside(current, drive: drive) else { return nil }
+        }
+        return current
+    }
+
+    /// Valve's service program where the registered image path points: "present" (already
+    /// there, never replaced), "copied" (Valve's installer copy, byte for byte), "no-installer"
+    /// (the client folder has no readable bin\SteamService.exe) or "failed".
+    nonisolated static func placeImage(drive: URL) -> String {
+        let fm = FileManager.default
+        if let target = DockInstallers.resolve(installedImage, drive: drive) {
+            // A leftover that is not a program (an interrupted copy) is not "there".
+            return DockInstallers.machine(target) != nil ? "present" : "failed"
+        }
+        guard let source = DockInstallers.resolve(installerImage, drive: drive), DockInstallers.machine(source) != nil else { return "no-installer" }
+        guard let parent = folder(["Program Files (x86)", "Common Files", "Steam"], drive: drive) else { return "failed" }
+        let target = parent.appendingPathComponent("SteamService.exe")
+        do {
+            try fm.copyItem(at: source, to: target)
+            guard fm.contentsEqual(atPath: source.path, andPath: target.path) else { try? fm.removeItem(at: target); return "failed" }
+            return "copied"
+        } catch {
+            try? fm.removeItem(at: target)
+            return "failed"
+        }
+    }
+
+    /// Called right before a Dock start, while no session runs (the registry is on disk), for
+    /// a start that asks Valve's client to prepare per-user executables. Returns the outcome
+    /// word the log line carries: off, already (key and file were there), added, no-registry
+    /// (the prefix has no system.reg yet), no-installer, image-failed or write-failed.
+    @discardableResult
+    static func prepare(_ game: DockGame, drive: URL, prefix: URL, now: Date = Date()) -> String {
+        guard game.customExecutables, SteamSignIn.flag("MADEIRA_DOCK_CEG", default: true) else { return "not-needed" }
+        let app = game.id
+        // A game with per-user executables (CEG) needs Valve's client service, which the Dock host's own installer step
+        // often failed to install in the session: BCD installs it before the session starts, with Valve's own files.
+        // env.MADEIRA_DOCK_CEG_SERVICE = 0 leaves it to the host, as before, and logs no Steam log lines after a failed start.
+        guard SteamSignIn.flag("MADEIRA_DOCK_CEG_SERVICE", default: true) else {
+            LogStore.shared.log("[ceg-service] app=\(app) off (MADEIRA_DOCK_CEG_SERVICE=0)")
+            return "off"
+        }
+        let registry = prefix.appendingPathComponent("system.reg")
+        guard let data = try? Data(contentsOf: registry), !data.isEmpty else {
+            LogStore.shared.log("[ceg-service] app=\(app) skipped: the prefix has no system.reg yet")
+            return "no-registry"
+        }
+        let text = String(decoding: data, as: UTF8.self)
+        guard text.hasPrefix("WINE REGISTRY Version 2") else {
+            LogStore.shared.log("[ceg-service] app=\(app) skipped: system.reg is not a Wine registry file", level: .error)
+            return "no-registry"
+        }
+        let keyThere = registered(in: text)
+        let image = placeImage(drive: drive)
+        if image == "no-installer" || image == "failed" {
+            // Without the program the key would point at nothing, and the host would no longer
+            // run Valve's installer: leave everything to the host, as before.
+            LogStore.shared.log("[ceg-service] app=\(app) key=\(keyThere ? "present" : "absent") image=\(image): not registered here; the host's own installer step runs as before",
+                                level: keyThere ? .info : .error)
+            return image == "failed" ? "image-failed" : "no-installer"
+        }
+        if keyThere {
+            LogStore.shared.log("[ceg-service] app=\(app) key=present image=\(image)")
+            return "already"
+        }
+        let (updated, added) = register(in: text, now: Int(now.timeIntervalSince1970))
+        guard added else { return "already" }
+        do {
+            let backup = registry.appendingPathExtension("bcd-bak")
+            if !FileManager.default.fileExists(atPath: backup.path) { try? FileManager.default.copyItem(at: registry, to: backup) }
+            try Data(updated.utf8).write(to: registry, options: .atomic)
+        } catch {
+            LogStore.shared.log("[ceg-service] app=\(app) key=absent image=\(image): system.reg not written (\(error.localizedDescription)); the host's own installer step runs as before", level: .error)
+            return "write-failed"
+        }
+        LogStore.shared.log("[ceg-service] app=\(app) registered=added service=\"\(serviceName)\" image=\(image) type=0x10 start=3 wow64=1 " +
+                            "path=\(installedImage); services.exe loads it at the session start, so the host finds it registered and runs no installer")
+        return "added"
+    }
+
+    // MARK: After a failed CEG start
+
+    /// madeira-bcd: a CEG start that ended with a failure (host result 49) leaves Valve's own
+    /// account of it in the client's log files. Their lines about the custom-executable job,
+    /// the service and DRM go to the log, a few dozen at most, with long numbers cut out; and
+    /// the folder's file names and sizes, so the next log says which files exist. 22 -> 55
+    /// (ceg-server-result 22, ceg-job-result 55) is what all three logged CEG sessions with a
+    /// registered service ended with (the service ran in two), and nothing in the session log says why.
+    private nonisolated static let logFiles = ["content_log.txt", "service_log.txt"]
+    private nonisolated static let logWords = ["ceg", "drm", "custom", "binar", "service", "remote", "fail", "error", "timeout", "denied"]
+
+    nonisolated static func steamLogLines(drive: URL, maxLines: Int = 40, maxBytes: Int = 96 * 1024) -> [String] {
+        guard let folder = DockInstallers.resolve("C:\\Program Files (x86)\\Steam\\logs", drive: drive) else {
+            return ["no logs folder in the client's folder"]
+        }
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).sorted()
+        var out = ["files=" + names.prefix(24).map { name in
+            let size = (try? folder.appendingPathComponent(name).resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? -1
+            return "\(name.filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" || $0 == "-" })(\(size))"
+        }.joined(separator: ",")]
+        for wanted in logFiles {
+            guard let name = names.first(where: { $0.caseInsensitiveCompare(wanted) == .orderedSame }),
+                  let handle = try? FileHandle(forReadingFrom: folder.appendingPathComponent(name)) else { continue }
+            defer { try? handle.close() }
+            let size = (try? handle.seekToEnd()) ?? 0
+            let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+            try? handle.seek(toOffset: start)
+            let text = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
+            let lines = text.split(whereSeparator: { $0.isNewline }).map(String.init)
+            let hits = lines.filter { line in let lower = line.lowercased(); return logWords.contains { lower.contains($0) } }
+            out.append("\(wanted) lines=\(lines.count) matching=\(hits.count)")
+            for line in hits.suffix(maxLines) { out.append("\(wanted): " + scrub(line)) }
+        }
+        return out
+    }
+
+    /// One log line, cut to 220 characters, with every run of nine or more digits (Steam IDs,
+    /// account numbers) replaced.
+    nonisolated static func scrub(_ line: String) -> String {
+        var result = "", digits = ""
+        func flush() { result += digits.count >= 9 ? "<n>" : digits; digits = "" }
+        for character in line.prefix(220) {
+            if character.isASCII, character.isNumber { digits.append(character) } else { flush(); result.append(character) }
+        }
+        flush()
+        return result.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Writes `steamLogLines` to the log, once per failed CEG start.
+    static func logSteamLogs(drive: URL) {
+        guard SteamSignIn.flag("MADEIRA_DOCK_CEG_SERVICE", default: true) else { return }
+        for line in steamLogLines(drive: drive) { LogStore.shared.log("[ceg-log] " + line) }
     }
 }

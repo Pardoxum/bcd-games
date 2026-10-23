@@ -6,7 +6,8 @@
 
 <p align="center">
   <b>Windows games on iPhone and iPad.</b><br>
-  A fast, controller-friendly launcher with Steam and GOG built in.
+  A fast, controller-friendly launcher with Steam and GOG built in.<br>
+  <sub>Alpha: early development, before beta. Many games run, many do not yet.</sub>
 </p>
 
 <p align="center">
@@ -18,6 +19,7 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/status-alpha-orange" alt="Alpha">
   <img src="https://img.shields.io/badge/iOS-18%2B-blue" alt="iOS 18+">
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="GPL-3.0">
   <img src="https://img.shields.io/badge/graphics-Metal-lightgrey" alt="Metal">
@@ -93,10 +95,36 @@ through BCD Dock:
 - Horizon Zero Dawn and Horizon Forbidden West
 - Red Dead Redemption 2, including the Rockstar Launcher
 - GTA V, Legacy and Enhanced
+- Grand Theft Auto IV: The Complete Edition
+- Counter-Strike 2
 - Crysis Remastered, Crysis 2 Remastered and Crysis 3 Remastered
 
 Also running: Warcraft II: Battle.net Edition. Work in progress: Ratchet & Clank: Rift Apart
 (around 20 FPS, with visual glitches).
+
+### Seen running in testers' logs and reports
+
+These games reached gameplay and were played for several minutes without a crash in the logs
+testers sent with Send Log, or were reported running on the BCD Discord with the device and
+frame rate. None of them was played from start to finish, and results depend on the device,
+the iOS version and the settings.
+
+- Celeste
+- Cleared Hot
+- Dark Souls II: Scholar of the First Sin
+- Dead Space (2008)
+- DELTARUNE
+- Doom 3
+- Fallout: New Vegas
+- Far Cry 3
+- Final Fantasy VII Remake Intergrade (M5 iPad Pro: low settings, 900p, 30 FPS)
+- Kingdom Hearts III (M5 iPad Pro: highest settings, mostly 60 FPS)
+- Marie's Room
+- METAL GEAR SOLID: Peace Walker - Master Collection Version
+- Metro 2033 Redux (iPhone 17 Pro: 60 FPS with tessellation off)
+- Moonlighter
+- Timberborn
+- Tomb Raider (2013)
 
 How well a game runs varies a lot; many games do not start yet.
 
@@ -118,10 +146,15 @@ How well a game runs varies a lot; many games do not start yet.
 
 ## Install
 
-1. Download [`BCD.ipa`](https://github.com/thebcd69/bcd-games/releases/latest/download/BCD.ipa)
-   from the latest [release](https://github.com/thebcd69/bcd-games/releases).
-2. Install it with SideStore, AltStore or LiveContainer.
-3. Open BCD. Setup walks you through JIT, LocalDevVPN, Steam and the extra runtimes.
+1. Get BCD one of two ways:
+   - **From the AltStore / SideStore source** (installs BCD and keeps it updated): in AltStore
+     Classic or SideStore, add `https://thebcd69.github.io/bcd-games/source.json` under Sources,
+     or open the [source page](https://thebcd69.github.io/bcd-games/) on your iPhone or iPad for
+     one-tap Add buttons. The source is by [le0-VV](https://github.com/le0-VV).
+   - **From the IPA:** download [`BCD.ipa`](https://github.com/thebcd69/bcd-games/releases/latest/download/BCD.ipa)
+     from the latest [release](https://github.com/thebcd69/bcd-games/releases) and install it with
+     SideStore, AltStore or LiveContainer.
+2. Open BCD. Setup walks you through JIT, LocalDevVPN, Steam and the extra runtimes.
 
 ## Reporting a problem
 
@@ -191,4 +224,4 @@ David Acevedo (dacevedo12), rpmalloc by Mattias Jansson, StikDebug, StikJIT, ide
 FreeType, and every library listed in THIRD-PARTY-NOTICES.md. Thank you to everyone who
 works on them.
 
-**BCD** by thebcd69.
+**BCD** by thebcd69, with the AltStore and SideStore source by **le0-VV** ([le0-VV](https://github.com/le0-VV)).

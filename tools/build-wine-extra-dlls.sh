@@ -9,7 +9,11 @@
 # Also ucrtbase-x64math.dll, an opt-in variant of ucrtbase (see UCX below), and
 # kernelbase-fibertrace.dll, an opt-in diagnostic kernelbase (see FBT below), and
 # wer-optin.dll, Wine's own wer.dll for the one game that imports it (see WER below), and
-# wintypes-optin.dll, Wine's own wintypes.dll for the games that import it (see WTY below).
+# wintypes-optin.dll, Wine's own wintypes.dll for the games that import it (see WTY below), and
+# setupapi-optin.dll, the shipped setupapi.dll with a lock round its device node table (see SDL below).
+# Also (2026-10-22, Resident Evil 2) winedmo.dll, the demuxer DLL nothing shipped imports, and the opt-in
+# mfasfsrcsnk-optin.dll, wmvdecod-optin.dll and wmadmod-optin.dll: Wine's ASF byte stream handler (built with
+# tools/patch-wine-mfasfsrcsnk-winedmo.py) and the WMV and WMA decoder MFTs behind it (see OPTIN_WANT below).
 # A DLL upstream already ships is never replaced. Run from the repository
 # root; needs llvm-mingw on PATH (or MINGW) and the native wine tools.
 #   usage: build-wine-extra-dlls.sh [native tools dir]
@@ -28,7 +32,7 @@ WANT="msvcr70 msvcr71 msvcr80 msvcr90 msvcr100 msvcr110 msvcrt20 msvcrt40 msvcir
       d3d10 d3d10_1 avifil32 msvfw32 dinput
       wbemprox wbemdisp wmiutils
       riched20 riched32 msftedit gdiplus mlang usp10 cabinet sspicli msxml3 msxml6
-      msasn1 wldp hnetcfg msctf xmllite netprofm d2d1 wmvcore winegstreamer srvcli
+      msasn1 wldp hnetcfg msctf xmllite netprofm d2d1 wmvcore winegstreamer srvcli winedmo
       xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9
       x3daudio1_0 x3daudio1_1 x3daudio1_2 x3daudio1_3 x3daudio1_4 x3daudio1_5 x3daudio1_6 x3daudio1_7
       xapofx1_1 xapofx1_2 xapofx1_3 xapofx1_4 xapofx1_5
@@ -125,8 +129,20 @@ fi
 # semicolon separated; app/Madeira/WineProcessBridge.m), so no program that loads one optionally today
 # sees a change. dxva2: Fort Solis and DRAGON BALL Sparking! ZERO import it and ended at once with
 # c0000135 (testers' logs 94MSWJ, NZ3ANE, H6XVPV, build 574); evr: Spider-Man: Miles Morales'
-# crs-video.exe (PD7S1E); xpsprint: Animal Well (NWHG8J, build 565). MADEIRA_OPTIN_BUILD=0 skips them.
-OPTIN_WANT="dxva2 evr xpsprint"
+# crs-video.exe (PD7S1E); xpsprint: Animal Well (NWHG8J, build 565); sfc, sfc_os and tbs: Diablo II: Resurrected's
+# D2R_loader.dll imports sfc.dll and tbs.dll and ended with c0000135 (bcd-games issue #3, build 573; sfc.dll forwards
+# to sfc_os.dll); twinapi.appcore: Senua's Saga: Hellblade II's XCurl.dll and Microsoft.Xbox.Services.GDK.C.Thunks.dll
+# import api-ms-win-core-psm-appnotify-l1-1-0.dll, which Wine's apiset maps to twinapi.appcore.dll, and the program ended
+# with c0000135 (tester's log XJ7Z6Y, build 576; Wine's DLL has RegisterAppStateChangeNotification and its three
+# neighbours, each a stub that returns ERROR_CALL_NOT_IMPLEMENTED); mfasfsrcsnk, wmvdecod and wmadmod: Resident Evil 2
+# plays WMV cutscenes through a Media Foundation source reader and ended at its first one (c0000135 for
+# C:\windows\system32\mfasfsrcsnk.dll, CLSID {41457294-644c-4298-a28a-bd69f2c0cf3b}, tester's log re2-ipadm4-579, build
+# 579): mfasfsrcsnk is Wine's ASF byte stream handler (built with tools/patch-wine-mfasfsrcsnk-winedmo.py, which makes it
+# use the FFmpeg demuxer in winedmo.dll, built above as a plain DLL because nothing shipped imports it), wmvdecod the WMV
+# decoder MFT and wmadmod the WMA decoder MFT the reader finds in the registry; both decoders run on BCD's winegstreamer
+# unix side, which a 64-bit game gets with env.MADEIRA_WG_64BIT = 1 (build/ntdll-unix/winegstreamer_wmv_ios.c).
+# The ByteStreamHandlers entries for .wmv and .asf and the CLSIDs are already in the prefix template. MADEIRA_OPTIN_BUILD=0 skips them.
+OPTIN_WANT="dxva2 evr xpsprint sfc sfc_os tbs twinapi.appcore mfasfsrcsnk wmvdecod wmadmod"
 OPT=""
 if [ "${MADEIRA_OPTIN_BUILD:-1}" != 0 ]; then
     for d in $OPTIN_WANT; do
@@ -135,7 +151,20 @@ if [ "${MADEIRA_OPTIN_BUILD:-1}" != 0 ]; then
         targets="$targets dlls/$d/arm64ec-windows/$d.dll"; OPT="$OPT $d"
     done
 fi
-[ -n "$todo$XI$WGI$UCX$NTS$FBT$WER$WTY$OPT" ] || { echo "nothing to build"; exit 0; }
+# madeira-bcd: setupapi-optin.dll, a patched copy of a DLL that IS shipped, so it cannot use the OPT list
+# above (which skips shipped names). Wine's setupapi has no lock round its device node table and
+# publishes the table's size before the table: Dying Light's libpad.dll and the game's main thread listed
+# devices at the same moment and one read a NULL table (setupapi.dll+0x132bc, log 1c807435, build 576).
+# tools/patch-wine-setupapi-devinst-lock.py adds the lock; the result ships NEXT TO the shipped
+# setupapi.dll, which stays byte for byte, and only a game with env.MADEIRA_OPTIN_DLLS = setupapi runs it
+# (app/Madeira/WineProcessBridge.m links it as setupapi.dll for that session; the next session's farm
+# relink restores the shipped one). Built in a make of its own after the patches above are undone (see
+# below). MADEIRA_SETUPAPI_BUILD=0 skips it.
+SDL=""
+if [ "${MADEIRA_SETUPAPI_BUILD:-1}" != 0 ] && [ -f "$R/wine/dlls/setupapi/devinst.c" ] && [ -f "$SHIP/setupapi.dll" ]; then
+    SDL=setupapi
+fi
+[ -n "$todo$XI$WGI$UCX$NTS$FBT$WER$WTY$OPT$SDL" ] || { echo "nothing to build"; exit 0; }
 
 # The cached tree may have disabled winegstreamer because macOS has no
 # GStreamer headers. Only its real PE frontend is needed here; the iOS unix
@@ -189,10 +218,25 @@ for d in $todo; do
     sed -i.bak -e '/^DELAYIMPORTS[[:space:]]*=/d' -e "s/^\(IMPORTS[[:space:]]*=.*\)\$/\1 $delayed/" "$mk" && rm -f "$mk.bak"
     undelayed="$undelayed $d"
 done
+# mfasfsrcsnk-optin.dll: Wine's ASF byte stream handler, patched to use winedmo (see the script). A patch that does not
+# apply drops the DLL (an unpatched one would hand the game to the generic handler, which cannot read ASF here).
+MFA=""
+case " $OPT " in *" mfasfsrcsnk "*) MFA=mfasfsrcsnk ;; esac
+if [ -n "$MFA" ]; then
+    if python3 "$R/tools/patch-wine-mfasfsrcsnk-winedmo.py" "$R/wine"; then
+        rm -f "$B/dlls/mfasfsrcsnk/arm64ec-windows/mfasfsrcsnk.dll" "$B"/dlls/mfasfsrcsnk/arm64ec-windows/*.o
+    else
+        echo "::warning::mfasfsrcsnk winedmo patch did not apply; mfasfsrcsnk-optin.dll not shipped"
+        targets="${targets/ dlls\/mfasfsrcsnk\/arm64ec-windows\/mfasfsrcsnk.dll/}"
+        OPT="${OPT/ mfasfsrcsnk/}"
+        MFA=""
+    fi
+fi
 [ -n "$targets" ] && make -C "$B" -k -j"$JOBS" $targets > "$B.build.log" 2>&1
 git -C "$R/wine" checkout -- dlls/msvcrt/main.c dlls/xinput1_3/main.c dlls/d2d1/dc_render_target.c \
     dlls/windows.gaming.input/provider.c dlls/windows.gaming.input/main.c
 for d in $undelayed; do git -C "$R/wine" checkout -- "dlls/$d/Makefile.in"; done
+[ -n "$MFA" ] && git -C "$R/wine" checkout -- dlls/mfsrcsnk/media_source.c
 [ -n "$undelayed" ] && echo "::notice::delay imports linked as plain imports:$undelayed"
 # madeira-bcd: ucrtbase-x64math.dll (see UCX above), from the restored tree:
 # msvcrt/main.c no longer carries the data-sync patch, so the DLL differs from a
@@ -254,6 +298,44 @@ if [ -n "$FBT" ]; then
     # shellcheck disable=SC2086 # the list is five fixed paths
     git -C "$R/wine" checkout -- $kbsrc
     rm -f "$kb" "$B"/dlls/kernelbase/arm64ec-windows/*.o
+fi
+# madeira-bcd: setupapi-optin.dll (see SDL above), from the restored tree. Stripped the way
+# build/wine-pe/build-modules.sh strips the shipped one (--strip-debug), padded to at least SizeOfImage
+# + 0x10000 like the other extra DLLs, and verified (the lock's marker, the shipped setupapi.dll's
+# exports) before it ships. Its delay imports stay, as in the shipped setupapi.dll. The tree and the
+# patched objects are restored afterwards (wine/build-arm64ec is cached).
+if [ -n "$SDL" ]; then
+    sa="$B/dlls/setupapi/arm64ec-windows/setupapi.dll"
+    sdl_tmp="$SHIP/setupapi-optin.dll.tmp"
+    if python3 "$R/tools/patch-wine-setupapi-devinst-lock.py" "$R/wine"; then
+        rm -f "$sa" "$B"/dlls/setupapi/arm64ec-windows/*.o
+        make -C "$B" -j"$JOBS" dlls/setupapi/arm64ec-windows/setupapi.dll > "$B.setupapi.log" 2>&1
+        if [ -f "$sa" ] && cp "$sa" "$sdl_tmp" && "$MINGW/arm64ec-w64-mingw32-strip" --strip-debug "$sdl_tmp"; then
+            python3 - "$sdl_tmp" <<'PY'
+import struct, sys
+p = sys.argv[1]; d = open(p, 'rb').read()
+pe = struct.unpack_from('<I', d, 0x3c)[0]
+target = struct.unpack_from('<I', d, pe + 24 + 56)[0] + 0x10000
+if len(d) < target:
+    open(p, 'ab').write(b'\0' * (target - len(d)))
+PY
+            if python3 "$R/tools/patch-wine-setupapi-devinst-lock.py" --verify "$sdl_tmp" "$SHIP/setupapi.dll"; then
+                mv "$sdl_tmp" "$SHIP/setupapi-optin.dll"
+                echo "::notice::setupapi-optin.dll (the shipped setupapi.dll with a lock round the device node table; linked as setupapi.dll only for a game with setupapi in env.MADEIRA_OPTIN_DLLS): built next to the shipped setupapi.dll"
+            else
+                rm -f "$sdl_tmp"
+                echo "::warning::setupapi-optin.dll failed its check; not shipped (env.MADEIRA_OPTIN_DLLS = setupapi does nothing)"
+            fi
+        else
+            rm -f "$sdl_tmp"
+            echo "::warning::setupapi-optin.dll did not build; env.MADEIRA_OPTIN_DLLS = setupapi does nothing"
+            grep -m 10 "error" "$B.setupapi.log"
+        fi
+    else
+        echo "::warning::setupapi devinst-lock patch did not apply; setupapi-optin.dll not shipped"
+    fi
+    git -C "$R/wine" checkout -- dlls/setupapi/devinst.c
+    rm -f "$sa" "$B"/dlls/setupapi/arm64ec-windows/*.o
 fi
 # madeira-bcd: ntdll-sync.dll (see NTS above), from the restored tree. First the
 # unpatched ntdll.dll, which must equal the shipped one apart from its time
@@ -397,6 +479,13 @@ PY
         echo "::notice::wintypes-optin.dll (Wine's wintypes.dll, linked as wintypes.dll only with env.MADEIRA_WINTYPES = 1): built; no wintypes.dll is shipped"
     else
         echo "::warning::wintypes-optin.dll did not build; env.MADEIRA_WINTYPES = 1 does nothing"
+    fi
+fi
+if [ -n "$MFA" ]; then
+    f="$B/dlls/mfasfsrcsnk/arm64ec-windows/mfasfsrcsnk.dll"
+    if [ -f "$f" ] && ! python3 "$R/tools/patch-wine-mfasfsrcsnk-winedmo.py" --verify "$f"; then
+        echo "::warning::mfasfsrcsnk.dll failed its check (no winedmo patch); not shipped"
+        rm -f "$f"
     fi
 fi
 for d in $OPT; do

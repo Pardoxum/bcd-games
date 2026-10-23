@@ -902,6 +902,8 @@ enum BCDDiagnostic: String, CaseIterable, Identifiable {
 }
 
 @MainActor protocol BCDLogsBackend: ObservableObject {
+    /// Said before a log is sent (an install without the increased memory limit); nil: nothing.
+    var sendLogAdvice: String? { get }
     /// The newest logs, newest first: only these can be sent.
     var recent: [BCDLogFile] { get }
     var sent: [BCDSentLog] { get }
@@ -923,6 +925,10 @@ enum BCDDiagnostic: String, CaseIterable, Identifiable {
     func refresh()
 }
 
+extension BCDLogsBackend {
+    var sendLogAdvice: String? { nil }
+}
+
 struct BCDLogsSettings<Backend: BCDLogsBackend>: View {
     @ObservedObject var backend: Backend
     @EnvironmentObject private var model: BCDSettingsModel
@@ -938,7 +944,7 @@ struct BCDLogsSettings<Backend: BCDLogsBackend>: View {
                 }
                 ForEach(backend.recent) { log in
                     BCDSettingsActionRow(id: BCDSettingsID.control(.logs, "send.\(log.name)"), title: BCDSettingsText.logName(log.name),
-                                         note: "\(log.date.formatted(date: .abbreviated, time: .shortened)) · \(BCDFormat.bytes(log.bytes))",
+                                         note: "\(BCDFormat.dateTime(log.date)) · \(BCDFormat.bytes(log.bytes))",
                                          symbol: "paperplane", enabled: !backend.sending) { confirmSend(log) }
                 }
                 if let status = backend.sendStatus {
@@ -951,7 +957,7 @@ struct BCDLogsSettings<Backend: BCDLogsBackend>: View {
                 BCDSettingsGroup(title: "Sent", footer: "Choose a code to copy it.") {
                     ForEach(backend.sent.prefix(5)) { item in
                         BCDSettingsActionRow(id: BCDSettingsID.control(.logs, "sent.\(item.code)"), title: item.code,
-                                             note: "\(BCDSettingsText.logName(item.name)) · \(item.date.formatted(date: .abbreviated, time: .shortened))",
+                                             note: "\(BCDSettingsText.logName(item.name)) · \(BCDFormat.dateTime(item.date))",
                                              detail: copied == item.code ? "Copied" : nil, symbol: "doc.on.doc") {
                             backend.copy(item.code)
                             copied = item.code
@@ -993,8 +999,11 @@ struct BCDLogsSettings<Backend: BCDLogsBackend>: View {
     }
 
     private func confirmSend(_ log: BCDLogFile) {
+        // An install without the increased memory limit: the setup is the usual cause, so say what fixes it
+        // first (MemoryRights.swift, through the live backend); sending is still possible.
         model.ask(BCDSettingsConfirm(title: "Send \(BCDSettingsText.logName(log.name))?",
-                                     message: "\(BCDFormat.bytes(log.bytes)), cleaned on this device before it leaves.",
+                                     message: "\(BCDFormat.bytes(log.bytes)), cleaned on this device before it leaves."
+                                        + (backend.sendLogAdvice.map { "\n\n" + $0 } ?? ""),
                                      choices: [.init(title: "Send") { backend.send(log) }]))
     }
 }

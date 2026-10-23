@@ -438,8 +438,8 @@ check(kind(editRule("rdr2-steam") { $0["switches"] = ["avx": 1] }) == .format, "
 check(kind(editRule("rdr2-steam") { $0["switches"] = ["fpsMode": 9] }) == .format, "an FPS mode that does not exist")
 check(kind(editRule("rdr2-steam") { $0["switches"] = ["resolution": "huge"] }) == .format, "a resolution that is not WxH")
 check(kind(editRule("rdr2-steam") { $0["switches"] = ["display": "zoom"] }) == .format, "a display mode that does not exist")
-check(kind(editRule("rdr2-steam") { $0["version"] = "10" }) == .format, "a version as text")
-check(kind(Data(String(decoding: builtInData, as: UTF8.self).replacingOccurrences(of: "\"version\": 10,", with: "\"version\": 10.5,").utf8)) == .format,
+check(kind(editRule("rdr2-steam") { $0["version"] = "11" }) == .format, "a version as text")
+check(kind(Data(String(decoding: builtInData, as: UTF8.self).replacingOccurrences(of: "\"version\": 11,", with: "\"version\": 11.5,").utf8)) == .format,
       "a version that is not whole")
 check(kind(editRule("breakneck") { $0["match"] = ["programs": [["name": #"C:\Games\breakneck.exe"#]]] }) == .format, "a program with a folder")
 check(kind(editRule("breakneck") { $0["match"] = ["steamFolders": ["Breakneck"]] }) == .format, "a Steam folder not lowercased")
@@ -466,6 +466,13 @@ check(kind(addLine("breakneck", #"env.MADEIRA_PRELOAD_DLLS = C:\x\evil.dll"#)) =
 check(kind(addLine("breakneck", "dxmt = d3d11.mipClampBC=1")) == .ok && kind(addLine("breakneck", "swap-min-kb = 64")) == .ok,
       "the two app-level keys that are game settings")
 check(kind(addLine("breakneck", "env.MADEIRA_FEX_AVX = 1")) == .ok, "auto-tune's known fix")
+check(kind(addLine("breakneck", "env.DOTNET_GCRegionRange = 400000000")) == .ok && kind(addLine("breakneck", "env.DOTNET_GCRegionRange = 0x400000000")) == .ok
+      && kind(addLine("breakneck", "env.DOTNET_GCRegionRange = 40000000")) == .ok && kind(addLine("breakneck", "env.DOTNET_GCRegionRange = 1000000000")) == .ok,
+      "the .NET GC's address range, 1 GB to 64 GB in hexadecimal (with or without 0x)")
+check(kind(addLine("breakneck", "env.DOTNET_GCRegionRange = 20000000")) == .policy && kind(addLine("breakneck", "env.DOTNET_GCRegionRange = 2000000000")) == .policy
+      && kind(addLine("breakneck", "env.DOTNET_GCRegionRange = 16GB")) == .policy && kind(addLine("breakneck", "env.DOTNET_GCRegionRange = -400000000")) == .policy
+      && kind(addLine("breakneck", "env.DOTNET_GCRegionRange = 0x")) == .policy && kind(addLine("breakneck", "env.DOTNET_GCRegionRange = 4000000000000000000")) == .policy,
+      "...and nothing else: not under 1 GB, not over 64 GB, not text")
 let later = addLine("breakneck", ["line": "a-key-of-build-700 = 1", "minBuild": 700])
 check(kind(later, build: 600) == .ok && kind(later, build: 700) == .policy && kind(later, build: 600, everyLine: true) == .policy
       && kind(later, build: nil) == .ok,
@@ -503,7 +510,7 @@ func bumped(_ version: Int, rdr2: Int? = nil) -> Data {
     var rules = o["rules"] as! [[String: Any]]
     let i = rules.firstIndex { $0["id"] as? String == "rdr2-steam" }!
     rules[i]["version"] = rdr2 ?? (rules[i]["version"] as! Int) + 1
-    rules[i]["config"] = (rules[i]["config"] as! [Any]) + ["env.MADEIRA_FEX_AVX = 1"]
+    rules[i]["config"] = (rules[i]["config"] as! [Any]) + ["env.MADEIRA_FREE_DELAY_MS = 0"]   // not a line rdr2-steam has (it pins MADEIRA_FEX_AVX = 0 since v11)
     o["rules"] = rules
     return data(o)
 }
@@ -585,7 +592,7 @@ check(r.message == "Updated to list \(v1 + 1): 1 change (\(rdr2Title)).", r.mess
 check(GameRecommendations.active.origin == .downloaded && GameRecommendations.active.version == v1 + 1 && s.version == v1 + 1
       && s.origin == .downloaded && s.sourceDescription.hasPrefix("Downloaded: list \(v1 + 1)"), "the model shows it")
 check(GameRecommendations.match(windowsPath: #"C:\Program Files (x86)\Steam\steamapps\common\Red Dead Redemption 2"#, steamAppID: nil,
-                                fileExists: { _ in false })!.fileText.hasSuffix("env.MADEIRA_FEX_AVX = 1\n"), "games match the newer list")
+                                fileExists: { _ in false })!.fileText.hasSuffix("env.MADEIRA_FREE_DELAY_MS = 0\n"), "games match the newer list")
 s = source(signed(bumped(v1 + 1)))
 r = await s.refresh()
 check(r == .upToDate(version: v1 + 1), "the same newer list again: up to date")

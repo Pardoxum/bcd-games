@@ -1268,6 +1268,12 @@ struct ContentView: View {
         // unless its Game details page chose "The game": then its own program starts below, like
         // any library game (SteamDirectStart).
         if let appID = entry.steamAppID, !entry.startsSteamGameDirectly {
+            // A second Play while this game's Dock start is on its way changes nothing: not the
+            // launch options applied below, and not the first start's sign-in (DockLaunchGate).
+            guard !DockStartScreen.launchGate.busy(now: ProcessInfo.processInfo.systemUptime) else {
+                LogStore.shared.log("[madeira-dock] a start is already on its way: this Play is ignored app=\(appID)")
+                return
+            }
             guard let game = MadeiraDock.games(drive: MadeiraDock.drive).first(where: { $0.id == appID }) else {
                 library.error = "Steam doesn't show this game as installed anymore. Refresh the library, then try again."; return
             }
@@ -1319,6 +1325,7 @@ struct ContentView: View {
         // log is named below, by upstream's rule (the program a launch starts).
         BCDLaunch.applyLibrary(entry, sessionLog: false)
         exportBCDDesktopProfile(entry)
+        if let line = DesktopGDISection.apply(entry) { logStore.log(line) }
         // This run's log under the program's name too (Documents/logs). A Steam game started
         // through Madeira Dock above gets its own from ntdll, once Valve's client starts it.
         let program = entry.desktop == true ? "explorer.exe"
@@ -2149,6 +2156,13 @@ struct ContentView: View {
     /// `profile` is a Steam game's library entry (its Game details page): the
     /// session then takes that entry's display, performance and on-screen settings.
     private func startDock(_ game: DockGame, compactPool: Bool, profile: LibraryEntry? = nil) {
+        // A second Play while a Dock start is on its way (a double tap) is ignored: its failure
+        // would clean up the first start's sign-in transfer and give the account back while the
+        // host signs in (Panzer Paladin 9BAP3Q: Dock code 30). DockLaunchGate.
+        guard !DockStartScreen.launchGate.busy(now: ProcessInfo.processInfo.systemUptime) else {
+            logStore.log("[madeira-dock] a start is already on its way: this Play is ignored app=\(game.id)")
+            return
+        }
         guard jitReadyForLaunch(entry: profile?.id,
                                 then: { startDock(game, compactPool: compactPool, profile: profile) }) else { return }
         guard cloudClear(game.id, name: game.name, retry: { startDock(game, compactPool: compactPool, profile: profile) }) else { return }
@@ -2162,7 +2176,10 @@ struct ContentView: View {
             library.restartNotice = LibraryModel.restartMessage
             return
         }
+        // This start is the one on its way until its session begins or it fails (below).
+        DockStartScreen.launchGate.begin(now: ProcessInfo.processInfo.systemUptime)
         func fail(_ error: Error) {
+            DockStartScreen.launchGate.end()
             MadeiraDock.cleanup()
             SteamOwnedLibrary.shared.dockEnded()
             MadeiraDockModel.shared.status = error.localizedDescription
@@ -2208,6 +2225,20 @@ struct ContentView: View {
             // a Reset takes out what they installed; the other games share those installs.
             DockInstallers.prepare(game, drive: MadeiraDock.drive, prefix: MadeiraDock.prefix,
                                    others: MadeiraDock.games(drive: MadeiraDock.drive))
+            // madeira-bcd (round 578): a start that has Valve's client prepare per-user executables (CEG)
+            // finds Valve's own client service installed, as on Windows; the Dock host's own installer
+            // step failed in 3 of 5 logged sessions (DockCEGService). No session runs yet.
+            if !DockInstallers.installsOnly {
+                DockCEGService.prepare(game, drive: MadeiraDock.drive, prefix: MadeiraDock.prefix)
+                // madeira-bcd (2026-10-21): Valve's client added Counter-Strike 2's dependency on the
+                // redistributables app 228980, which BCD never installs, and every later start waited
+                // with error 17 (SteamSharedRedist). Only while 228980 is not fully installed.
+                if SteamSignIn.flag("MADEIRA_DOCK_SHARED_REDIST", default: true),
+                   let line = SteamSharedRedist.prepare(appID: game.id,
+                                                        steamApps: MadeiraDock.drive.appendingPathComponent(game.library, isDirectory: true)) {
+                    logStore.log(line)
+                }
+            }
             if DockInstallers.installsOnly {
                 // No host runs in this session: nothing will take the sign-in transfer.
                 MadeiraDock.cleanup()
@@ -2265,6 +2296,7 @@ struct ContentView: View {
             MadeiraDockModel.shared.watchReport()
             if let profile { library.begin(profile, dock: game) }
             else { library.begin(.dockSession(title: game.name, width: width, height: height), remember: false, dock: game) }
+            DockStartScreen.launchGate.end()   // the library session exists now: its own guards answer a later Play
             runWineFullSequence(profile: profile)
         }
     }
@@ -2694,6 +2726,11 @@ struct TouchControlsOverlay: View {
         let accepting = !m.editing && !library.blocksGameplayTouch
         GamepadInput.shared.configureTouch(controls: Set(ids), acceptingInput: accepting)
         TouchMouseGate.padOverlay = accepting && !ids.isEmpty
+        // The `[touch] layout=... kind=... keys-path=... pad=...` line: what the touch layer does with the layout
+        // on screen, while a game runs (a library session or a program Wine runs by itself).
+        if library.current != nil || wine_process_is_running() != 0 {
+            ControlPresetsModel.shared.logPlan(shown: landscape && m.visible, accepting: accepting)
+        }
     }
 
     /// ml1970: with MADEIRA_CONTROLS_XBOX_DEFAULT=1, a user with no controls file gets the built-in controller
@@ -2739,5 +2776,35 @@ extension ControlAction {
         case "Y": return Color(red: 0.96, green: 0.76, blue: 0.16)
         default:  return nil
         }
+    }
+}
+
+/// madeira-bcd: the library's Desktop gets the section-backed GDI handle table (owner, 2026-10-21).
+/// The Desktop is where programs are installed and started by hand, and those are often 32-bit
+/// (Battle.net-Setup.exe, build 579). Its session starts 64-bit (explorer), and win32u decides once,
+/// when the first program initialises it, whether the GDI handle table is a section a 32-bit program
+/// can map inside its own guest window (wine dlls/win32u/gdiobj.c, gdi_shared_use_section). Left to
+/// that default the table is private host memory, and 32-bit gdi32 truncates its address and faults
+/// on its first GDI handle. The Dock asks for the section the same way (startDock). Only the
+/// library's Desktop: a game started "In a Wine desktop" keeps the default.
+/// env.MADEIRA_GDI_SHARED_SECTION = 0 in the Desktop's Game config or in bcd.cfg, which the bridge
+/// exports after this, turns it off.
+enum DesktopGDISection {
+    /// This app run's Desktop set the variable; another library start clears it again.
+    private static var setByDesktop = false
+
+    /// For every library start, before the session starts: the log line to write, or nil.
+    static func apply(_ entry: LibraryEntry) -> String? {
+        if entry.desktop == true {
+            setenv("MADEIRA_GDI_SHARED_SECTION", "1", 1)
+            setByDesktop = true
+            return "[bcd] Desktop: section-backed GDI table for the 32-bit programs started here "
+                + "(MADEIRA_GDI_SHARED_SECTION=1; env.MADEIRA_GDI_SHARED_SECTION = 0 in its Game config turns it off)"
+        }
+        if setByDesktop {
+            unsetenv("MADEIRA_GDI_SHARED_SECTION")
+            setByDesktop = false
+        }
+        return nil
     }
 }

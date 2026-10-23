@@ -49,6 +49,15 @@ struct AutoTuneRule: Codable {
     /// How far the session got (AutoTuneLogFacts.stage).
     var minStage: Int?
     var maxStage: Int?
+    /// The largest image that got no JIT-pool copy ("[jit-pool] EXHAUSTED (image BASE+SIZE)") was at most this many
+    /// MiB. A session whose log has no such line passes (an anonymous allocation that failed, or no pool failure).
+    /// pool-split-exhausted uses it: no region of a split pool takes an image of 300 MiB or more after the 100-190 MiB of
+    /// Wine copies that are already placed, so the attempt cannot help (Stellar Blade Demo, FINAL FANTASY RESONANCE DEMO).
+    var imageMaxMB: Int?
+    /// The session's main program (the image at 0x140000000 whose relocations are stripped, "ml985: map_image_view size=0x...") was at most
+    /// this many MiB. A log with no such line passes. exe-window-fixed-base uses it: its line asks for a 512 MB window, which cannot hold
+    /// a program of 512 MiB or more (Persona 4 Golden's 888 MiB), and no window is larger than the free run below the system's thread stacks.
+    var exeMaxMB: Int?
     /// May replace a line auto-tune kept earlier with the same key (a larger swap file
     /// after the first was not enough). Never a key the user sets.
     var upgrade: Bool?
@@ -103,6 +112,10 @@ struct AutoTuneLogFacts: Codable, Equatable {
     var aliveSeconds = 0
     var lastFootprintMB: Int?
     var peakFootprintMB: Int?
+    /// The memory limit the log itself names: "ml992: os_proc_available_memory=A MB + phys_footprint=B MB = L MB".
+    /// A kill is told from the footprint's last line against it when the app's own marker had none (Clair Obscur
+    /// A5HRFG died at 6105 of 6144 MB and was not seen as killed: the fallback below guessed 6366).
+    var limitMB: Int?
     var quitRequested = false
     var returnedToLibrary = false
     var exitStatus: UInt32?
@@ -113,6 +126,9 @@ struct AutoTuneLogFacts: Codable, Equatable {
     /// The highest "detach-wait: presents=N" (every 30 s while the app waits on the game;
     /// in a Madeira Dock session the only frame count the log has).
     var presentsLogged = 0
+    /// Whether any "detach-wait: presents=N" line was seen at all. Only Dock sessions print it, so a
+    /// zero count means "no frame" only when the counter was there.
+    var presentsCounted: Bool? = nil
     /// Metal command buffers that failed ("Device error at frame"): a GPU hang or fault.
     var gpuErrors = 0
     /// What the game's own error boxes said ([win-name] texts that read like an error),
@@ -129,9 +145,43 @@ struct AutoTuneLogFacts: Codable, Equatable {
     /// build nor a download has Wine Mono" line is written at every start of a device without
     /// Mono, for games that do not need .NET too.
     var monoMissing = false
+    /// The largest image in the log's "[jit-pool] EXHAUSTED (image 0xBASE+0xSIZE)" lines, in MiB (rounded down): the
+    /// loader found no room in the JIT pool for that image's copy. nil when no image failed that way.
+    var jitImageFailMB: Int?
+    /// The largest main-program image the log maps at its fixed base 0x140000000 with its relocations stripped ("ml985: map_image_view
+    /// size=0xS base=0x140000000 ... charact=0x23", printed for any image of 64 MiB or more), in MiB (rounded down). nil when there is none.
+    var fixedExeMB: Int?
     /// Crash evidence already in the log when the user asked to quit: a Steam game through
     /// Madeira Dock can crash and leave the session open until the user closes it.
     var crashEvidenceAtQuit: Int?
+    /// This app run was a Madeira Dock session of the one-time installs only ("[madeira-dock] app N: this session runs only
+    /// the one-time installs; the host starts after a restart"): no game runs in it.
+    var installsOnly = false
+    /// The install batch ended ("[dock-installers] end succeeded=N failed=M of=T; the session ends, the game starts after a
+    /// restart"): what the session does after that is BCD's own restart, not the game.
+    var installsEnded = false
+    /// The one-time installs are over and no game ran: BCD closes the session itself for a restart (Grand Theft Auto V's
+    /// Rockstar installs, NM88NQ), or an installer's helper failed and the batch ended with it (Saints Row: The Third's DirectX
+    /// setup, T3P8HK). Such a run is no session of the game: nothing in it is a failure of the game's settings. A batch that
+    /// never ended (Batman: Arkham City's .NET setup) is not this: its hang is scored as before.
+    var installsOver: Bool { installsOnly && installsEnded }
+    /// The Wine process ended with exit code 0 ("[WineProc] Wine exited with code 0 (caught by longjmp)"). What the log shows after it is
+    /// teardown: a worker thread that was still running when the modules were unmapped faults (Shade: Wrath of Angels, 2Y4GAX and TK5QJY, the
+    /// game had presented for 75 s and the app scored a crash). Faults and error exits counted before this line stay crash evidence; after it
+    /// nothing is counted (unhandled, errorExits, exitStatus) and the app's own crash status is not taken for the game's.
+    var cleanMainExit = false
+    /// The last "[hwinput] keyboard focus:" line said the keyboard went elsewhere because the app went inactive or the pointer left the
+    /// game view: the user was away when the log ended. Final Fantasy Tactics 7QVF78 (19 s, "app inactive") and THPS 3+4 NZECAK
+    /// (24 s, "pointer left the game view") were scored as the game ending early.
+    var focusLeft = false
+    /// Something printed a frame: "Game is presenting (#1", "Early detach: game presenting and settled", a "detach-wait: presents=N" with
+    /// N of 1 or more, or the launch cover coming down because of a present. The stage rises with other lines too, and with the clock:
+    /// the cover coming down to the desktop ("reason=show-desktop") counts as a first frame (stage 3) and five minutes alive as stage 5.
+    var frameSeen = false
+    /// The Dock's frame counter was in the log ("detach-wait: presents=N") and stayed at 0, and nothing else printed a frame: a run whose
+    /// stage came from the clock or from the cover going to the desktop did not play (Call of Duty HQ waited 331 s with presents=0; the
+    /// Rockstar launcher sessions of GTA V Legacy and GTA IV; Doom 3, which draws through OpenGL).
+    var noFrames: Bool { presentsCounted == true && presentsLogged == 0 && !frameSeen }
 
     var crashEvidence: Int { unhandled + errorExits + (runtimeErrorDialog ? 1 : 0) + (exitStatus == nil ? 0 : 1) }
 }
@@ -260,10 +310,24 @@ final class AutoTuneLogScanner {
     private static let mWineStart = Array("[phase] wine-start".utf8)
     private static let mModule = Array("Load module ".utf8)
     private static let mX64Image = Array("[x64-image]".utf8)
+    private static let mJitImageFail = Array("[jit-pool] EXHAUSTED (image 0x".utf8)
+    /// "+0x" as bytes, not as an Array("...".utf8) literal: tools/autotune-fixture.py keeps every line a literal of that
+    /// shape matches, and "+0x" would match far more than the pool's line.
+    private static let mPlus0x: [UInt8] = [0x2B, 0x30, 0x78]
+    private static let mMapImage = Array("ml985: map_image_view size=0x".utf8)
+    private static let mFixedBase = Array("base=0x140000000 ".utf8)
+    private static let mRelocsStripped = Array("charact=0x23 ".utf8)
     private static let mPresenting = Array("Game is presenting (#1".utf8)
     private static let mSettled = Array("Early detach: game presenting and settled".utf8)
     private static let mAlive = Array("[freeze] alive t+".utf8)
+    private static let mLimitLine = Array("ml992: os_proc_available_memory=".utf8)
+    /// " MB = " as bytes, not as an Array("...".utf8) literal: tools/autotune-fixture.py keeps every line a literal of that
+    /// shape matches, and this one would match far more than the ml992 line.
+    private static let mLimitEq: [UInt8] = [0x20, 0x4D, 0x42, 0x20, 0x3D, 0x20]
     private static let mFootprint = Array("[footprint] rev=ml358 phys=".utf8)
+    /// The fast sampler's line ("[footprint] rev=ml1060 fast phys=N MB"): near the limit it is written more often than the
+    /// ml358 census, so a kill's last reading is often only there (Miles Morales V4JGSJ: 8154 MB fast vs 7975 MB census).
+    private static let mFootprintFast = Array("[footprint] rev=ml1060 fast phys=".utf8)
     private static let mPeak = Array("(peak ".utf8)
     private static let mQuit = Array("[frontend] graceful close requested".utf8)
     private static let mReturned = Array("[frontend] returned to library".utf8)
@@ -275,9 +339,15 @@ final class AutoTuneLogScanner {
     private static let mMainStall = Array("[main-stall] #".utf8)
     private static let mDetachWait = Array("detach-wait: presents=".utf8)
     private static let mLaunchView = Array("[launch-view] dismissed reason=".utf8)
+    private static let mCoverByPresent = Array("dismissed reason=present".utf8)
     private static let mDeviceError = Array("Device error at frame".utf8)
     private static let mTerminate = Array("NtTerminateProcess(".utf8)
     private static let mErrorCode = Array("exit_code=0xc".utf8)
+    /// The whole Wine process finished with code 0 (the trailing " (" keeps code 0 from matching 01, 0x.. and the like).
+    private static let mWineExit0 = Array("[WineProc] Wine exited with code 0 (".utf8)
+    private static let mFocus = Array("[hwinput] keyboard focus: ".utf8)
+    private static let mFocusElsewhereInactive = Array("elsewhere (app inactive)".utf8)
+    private static let mFocusElsewherePointer = Array("elsewhere (pointer left the game view)".utf8)
     /// 0x8... codes too: a breakpoint (0x80000003) or Wine's assertion exit (0x80000101).
     private static let mWarningCode = Array("exit_code=0x8".utf8)
     private static let mChildNegative = Array("child exited with code -".utf8)
@@ -291,6 +361,14 @@ final class AutoTuneLogScanner {
     private static let mMonoMissing = Array("Wine Mono is not installed".utf8)
     private static let mWinName = Array("[win-name] #".utf8)
     private static let mText = Array(" text=\"".utf8)
+    /// The app's own words for a Madeira Dock session that runs only the one-time installs: in the "[madeira-dock] app N: ..." line
+    /// and again in the "[dock-installers] app=N ..." line, once per such session and in no other.
+    private static let mInstallsOnly = Array("this session runs only the one-time installs".utf8)
+    private static let mInstallsEnded = Array("[dock-installers] end succeeded=".utf8)
+    /// Window titles that read like an error and are not one. GameMaker's runner creates a hidden form named "Error Messages"
+    /// at start, long before the game's own window (Hotline Miami, logs 339R82 and 1VPXSG, lines 1913 and 1919 of 12,400);
+    /// counted as the game's error box it made a game that ended itself with exit 0 a "crash".
+    private static let notDialogs: Set<String> = ["Error Messages"]
     private static let errorWords = ["error", "Error", "ERROR", "could not", "Could not", "Could Not", "failed", "Failed",
                                      "not supported", "unable", "Unable", "cannot", "Cannot", "Fatal", "fatal"].map { Array($0.utf8) }
 
@@ -307,32 +385,57 @@ final class AutoTuneLogScanner {
         if facts.stage < 2, S.find(l, S.mModule) != nil || S.find(l, S.mX64Image) != nil { facts.stage = 2 }
         if facts.stage < 3, S.find(l, S.mPresenting) != nil { facts.stage = 3 }
         if facts.stage < 4, S.find(l, S.mSettled) != nil { facts.stage = 4 }
+        if !facts.frameSeen, S.find(l, S.mPresenting) != nil || S.find(l, S.mSettled) != nil { facts.frameSeen = true }
+        if let at = S.find(l, S.mJitImageFail),
+           let size = S.number(UnsafeRawBufferPointer(rebasing: l[at...]), after: S.mPlus0x, hex: true) {
+            facts.jitImageFailMB = max(facts.jitImageFailMB ?? 0, Int(min(size >> 20, 1 << 20)))
+        }
+        if S.find(l, S.mMapImage) != nil, S.find(l, S.mFixedBase) != nil, S.find(l, S.mRelocsStripped) != nil,
+           let size = S.number(l, after: S.mMapImage, hex: true) {
+            facts.fixedExeMB = max(facts.fixedExeMB ?? 0, Int(min(size >> 20, 1 << 20)))
+        }
         if let v = S.number(l, after: S.mAlive) { facts.aliveSeconds = max(facts.aliveSeconds, Int(v)) }
+        if facts.limitMB == nil, let at = S.find(l, S.mLimitLine),
+           let v = S.number(UnsafeRawBufferPointer(rebasing: l[at...]), after: S.mLimitEq), v >= 1024, v <= 65536 {
+            facts.limitMB = Int(v)
+        }
         if let v = S.number(l, after: S.mFootprint) {
             facts.lastFootprintMB = Int(v)
             if let p = S.number(l, after: S.mPeak) { facts.peakFootprintMB = max(facts.peakFootprintMB ?? 0, Int(p)) }
+        } else if let v = S.number(l, after: S.mFootprintFast) {
+            facts.lastFootprintMB = Int(v)
+            facts.peakFootprintMB = max(facts.peakFootprintMB ?? 0, Int(v))
         }
         if S.find(l, S.mQuit) != nil {
             if !facts.quitRequested { facts.crashEvidenceAtQuit = facts.crashEvidence }
             facts.quitRequested = true
         }
         if S.find(l, S.mReturned) != nil { facts.returnedToLibrary = true }
-        if let v = S.number(l, after: S.mExitReport, hex: true) { facts.exitStatus = UInt32(truncatingIfNeeded: v) }
-        if S.find(l, S.mUnhandled) != nil || S.find(l, S.mRootFrame) != nil { facts.unhandled += 1 }
+        if !facts.cleanMainExit, S.find(l, S.mWineExit0) != nil { facts.cleanMainExit = true }
+        if S.find(l, S.mFocus) != nil {
+            facts.focusLeft = S.find(l, S.mFocusElsewhereInactive) != nil || S.find(l, S.mFocusElsewherePointer) != nil
+        }
+        if !facts.cleanMainExit, let v = S.number(l, after: S.mExitReport, hex: true) { facts.exitStatus = UInt32(truncatingIfNeeded: v) }
+        if !facts.cleanMainExit, S.find(l, S.mUnhandled) != nil || S.find(l, S.mRootFrame) != nil { facts.unhandled += 1 }
         if S.find(l, S.mRuntimeError) != nil { facts.runtimeErrorDialog = true }
         if S.find(l, S.mFreeze) != nil { facts.freezeGaps += 1 }
         if S.find(l, S.mMainStall) != nil { facts.mainStalls += 1 }
         if let v = S.number(l, after: S.mDetachWait) {
+            facts.presentsCounted = true
             facts.presentsLogged = max(facts.presentsLogged, Int(v))
-            if v >= 1 { facts.stage = max(facts.stage, 3) }
+            if v >= 1 { facts.stage = max(facts.stage, 3); facts.frameSeen = true }
             if v >= 600 { facts.stage = max(facts.stage, 4) }   // about 20 s of frames
         }
         if facts.stage < 3, S.find(l, S.mLaunchView) != nil { facts.stage = 3 }
+        if S.find(l, S.mLaunchView) != nil, S.find(l, S.mCoverByPresent) != nil { facts.frameSeen = true }
         if S.find(l, S.mDeviceError) != nil { facts.gpuErrors += 1 }
-        if (S.find(l, S.mTerminate) != nil && (S.find(l, S.mErrorCode) != nil || S.find(l, S.mWarningCode) != nil))
+        if !facts.cleanMainExit,
+           (S.find(l, S.mTerminate) != nil && (S.find(l, S.mErrorCode) != nil || S.find(l, S.mWarningCode) != nil))
             || S.find(l, S.mChildNegative) != nil || S.find(l, S.mInitFailed) != nil
             || S.find(l, S.mObjCException) != nil || S.find(l, S.mRedelivKill) != nil { facts.errorExits += 1 }
         if !facts.monoMissing, S.find(l, S.mMscoreeErr) != nil, S.find(l, S.mMonoMissing) != nil { facts.monoMissing = true }
+        if !facts.installsOnly, S.find(l, S.mInstallsOnly) != nil { facts.installsOnly = true }
+        if !facts.installsEnded, S.find(l, S.mInstallsEnded) != nil { facts.installsEnded = true }
         if facts.dialogs.count < 4, S.find(l, S.mWinName) != nil, let t = S.find(l, S.mText) {
             let start = t + S.mText.count
             var end = start
@@ -340,7 +443,7 @@ final class AutoTuneLogScanner {
             let text = String(decoding: UnsafeRawBufferPointer(rebasing: l[start..<min(end, start + 200)]), as: UTF8.self)
             // A caption alone ("Critical error") says less than the box's own line; keep both, once each.
             if S.errorWords.contains(where: { S.find(UnsafeRawBufferPointer(rebasing: l[start..<end]), $0) != nil }),
-               !facts.dialogs.contains(text) { facts.dialogs.append(text) }
+               !S.notDialogs.contains(text), !facts.dialogs.contains(text) { facts.dialogs.append(text) }
         }
     }
 }
@@ -384,6 +487,11 @@ struct AutoTuneReport: Codable, Equatable {
     /// The session failed and a .NET Framework program in it found no Wine Mono
     /// (AutoTuneLogFacts.monoMissing). Optional, so that a saved state without it still loads.
     var monoMissing: Bool?
+    /// The largest image that got no JIT-pool copy, in MiB (AutoTuneLogFacts.jitImageFailMB). Optional, so that a saved
+    /// state without it still loads.
+    var jitImageFailMB: Int?
+    /// The main program's image in MiB (AutoTuneLogFacts.fixedExeMB). Optional, so that a saved state without it still loads.
+    var fixedExeMB: Int?
 
     var failed: Bool { ["crashed", "killed", "hung", "exited-early"].contains(outcome) }
     var played: Bool { outcome == "ran" || outcome == "quit" }
@@ -393,12 +501,25 @@ enum AutoTuneEngine {
     static let maxAttempts = 8
 
     static func outcome(_ end: AutoTuneSessionEnd, _ f: AutoTuneLogFacts) -> String {
+        // madeira-bcd (round 579): an app run that only ran the one-time installs (Dock, DockInstallers.installsOnly), and whose
+        // batch ended, ran no game: BCD closes it for a restart (the next start asked what happened, the user said "closed by
+        // itself", and it was scored "killed ... matched swap-8gb-memory-kill": GTA V Legacy NM88NQ), or an installer's helper
+        // failed (Saints Row: The Third's DirectX setup, T3P8HK, scored "crashed" and given exe-window-mb = 512 for the game).
+        // Nothing to learn about the game's settings.
+        if f.installsOver { return "inconclusive" }
         let crashedInLog = f.unhandled > 0 || f.runtimeErrorDialog || f.exitStatus != nil || f.errorExits > 0
             || (!f.dialogs.isEmpty && f.stage < 4)
         if end.killed {
             if end.userSaid == "i-closed" { return "inconclusive" }
             if end.userSaid == "froze" || f.freezeGaps > 0 || f.gpuErrors > 0
                 || (f.quitRequested && !f.returnedToLibrary) { return "hung" }
+            // madeira-bcd 578 (lead, from ajan6-mm): a session killed at the memory limit whose only crash evidence is
+            // a helper program's error exit (Miles Morales' crs-video.exe, c0000135) is a memory kill, not a crash:
+            // otherwise the swap rules can never fire for such a game (V4JGSJ, VWKPTS ended at 8154 of 8192 MB).
+            let onlyHelperExits = f.errorExits > 0 && f.unhandled == 0 && !f.runtimeErrorDialog && f.exitStatus == nil
+                && (f.dialogs.isEmpty || f.stage >= 4)
+            if onlyHelperExits, let last = f.lastFootprintMB, let limit = end.limitMB ?? f.limitMB,
+               last >= limit - max(150, limit / 50) { return "killed" }
             if crashedInLog { return "crashed" }
             // The limit the marker measured, else the memory left at launch plus the app's own
             // share then; the last footprint line can be 2 s behind the kill, hence a margin.
@@ -406,8 +527,10 @@ enum AutoTuneEngine {
             // called a memory kill would steer the search (HFW 2026-10-13 17:10 ended at
             // 7932 MB of about 8317 and had played).
             if let last = f.lastFootprintMB {
-                if let limit = end.limitMB, last >= limit - max(150, limit / 50) { return "killed" }
-                if end.limitMB == nil, let avail = f.availableMB {
+                // The app's marker first, else the limit the log names (ml992), else the guess below.
+                let known = end.limitMB ?? f.limitMB
+                if let limit = known, last >= limit - max(150, limit / 50) { return "killed" }
+                if known == nil, let avail = f.availableMB {
                     let limit = avail + 256
                     if last >= limit - max(200, limit * 3 / 100) { return "killed" }
                 }
@@ -415,13 +538,23 @@ enum AutoTuneEngine {
             if end.userSaid == "closed-by-itself" { return "killed" }
             return "inconclusive"
         }
-        if !end.sawProcess && end.crashStatus == nil { return "inconclusive" }
+        // The app's crash status of a run whose Wine process ended with code 0 is a leftover thread's (cleanMainExit).
+        let crashStatus = f.cleanMainExit ? nil : end.crashStatus
+        if !end.sawProcess && crashStatus == nil { return "inconclusive" }
         // The user quit a game that was on screen: whatever it logged on the way out, it played,
         // unless it had crashed before the user asked (the quit line's moment, when it is logged).
         if end.quitRequested && f.stage >= 3 && (f.crashEvidenceAtQuit ?? 0) == 0 { return "quit" }
-        if end.crashStatus != nil || crashedInLog { return "crashed" }
+        if crashStatus != nil || crashedInLog { return "crashed" }
         if end.quitRequested { return "exited-early" }
-        return f.stage >= 4 || f.aliveSeconds >= 120 ? "ran" : "exited-early"
+        // Alive for two minutes is not playing when no frame was ever presented (No Man's Sky 4KAT5E sat 151 s at
+        // stage 2 with presents=0): only a session that presented counts as having run.
+        // madeira-bcd (round 577, lead): narrowed. Only the Dock's "detach-wait: presents=N" counts frames, so a session
+        // without that counter (a local program, GOG) keeps the old rule; a session is "not run" only when the counter
+        // was there, stayed at 0 and the game never reached the presenting stage (stage 3).
+        // madeira-bcd (round 580, lead): a wider "no frames" rule was tried and left out: a game that draws without the
+        // Dock's frame counter (OpenGL, GDI) would read as not run, and auto-tune would add lines to a game that plays.
+        let noFrameProof = (f.presentsCounted ?? false) && f.presentsLogged == 0 && f.stage < 3
+        return f.stage >= 4 || (f.aliveSeconds >= 120 && !noFrameProof) ? "ran" : "exited-early"
     }
 
     static func report(_ end: AutoTuneSessionEnd, _ scanner: AutoTuneLogScanner,
@@ -434,12 +567,20 @@ enum AutoTuneEngine {
         let r = AutoTuneReport(outcome: out, stage: stage, seconds: max(end.seconds, Double(f.aliveSeconds)),
                                presents: presents, peakMB: f.peakFootprintMB, dock: f.dock,
                                d3d12: f.d3d12, ramMB: f.ramMB, matched: [], evidence: scanner.evidence,
-                               dialogs: f.dialogs, build: f.build)
+                               dialogs: f.dialogs, build: f.build, jitImageFailMB: f.jitImageFailMB, fixedExeMB: f.fixedExeMB)
         var report = r
         if f.monoMissing && report.failed { report.monoMissing = true }
         report.matched = rules.filter { matches($0, report: r, counts: scanner.counts, signals: signals) }
             .sorted { ($0.priority, $0.id) < ($1.priority, $1.id) }
             .map(\.id)
+        // madeira-bcd (round 580): a run that did not get far, with no crash, no quit and no sign of any known failure, whose log ends
+        // with the user away (the app inactive or the pointer off the game view), is the user leaving: it says nothing about the game's
+        // settings, and as a failure it would send a line that was being tried back (Final Fantasy Tactics 7QVF78: 19 s, "app
+        // inactive", judged against a memory kill) or leave the game "stuck". A session that matched a rule keeps its verdict: the
+        // rule's signals are in the log whoever left.
+        if report.outcome == "exited-early", f.focusLeft, !end.quitRequested, report.matched.isEmpty {
+            report.outcome = "inconclusive"
+        }
         return report
     }
 
@@ -469,6 +610,8 @@ enum AutoTuneEngine {
         if let hi = rule.ramMaxMB, (report.ramMB ?? Int.max) > hi { return false }
         if let lo = rule.minStage, report.stage < lo { return false }
         if let hi = rule.maxStage, report.stage > hi { return false }
+        if let hi = rule.imageMaxMB, let image = report.jitImageFailMB, image > hi { return false }
+        if let hi = rule.exeMaxMB, let exe = report.fixedExeMB, exe > hi { return false }
         guard !rule.all.isEmpty, rule.all.allSatisfy(seen) else { return false }
         if let any = rule.any, !any.isEmpty, !any.contains(where: seen) { return false }
         if let none = rule.none, none.contains(where: seen) { return false }
@@ -478,6 +621,13 @@ enum AutoTuneEngine {
     /// Did `now` get further than `best`? `tried`: the rule whose lines this session added.
     static func better(_ now: AutoTuneReport, than best: AutoTuneReport, tried: String? = nil) -> Bool {
         if now.played != best.played { return now.played }
+        // madeira-bcd (round 580): the JIT pool refusing an image is a failure at load time. A start that has no such line any more, whose
+        // modules loaded (stage 2 at least) and that stopped in the game's own code got further than one that could not load, whatever the
+        // stage counter and the clock say: the failing load leaves the game's error box on screen until the user closes it (RAIDOU
+        // Remastered, B07FN7 without the line: 384 MiB refused, 60 s), while the start that loaded stops in the game's code after 21 s
+        // (DCXTB5 with env.MADEIRA_X64_IMAGE_NOCOPY = 1, the same stage): the line was reverted and the next start failed to load again.
+        if let tried, now.failed, best.failed, best.matched.contains(tried), !now.matched.contains(tried),
+           best.jitImageFailMB != nil, now.jitImageFailMB == nil, now.stage >= 2 { return true }
         if now.stage != best.stage { return now.stage > best.stage }
         // Same stage: a longer life by half again, and at least 10 s, counts.
         if now.seconds >= best.seconds * 1.5 && now.seconds - best.seconds >= 10 { return true }
@@ -630,10 +780,14 @@ extension AutoTuneEngine {
             return s
         }
         let keptKeys = Set(s.kept.map(AutoTuneRules.key))
+        // madeira-bcd (round 580): a rule that adds the very lines an earlier try of another rule added is not a new try (the NOCOPY line
+        // belongs to x64-image-nocopy, x64-image-smc-nocopy and x64-image-rwx-protector-nocopy; the plain-RWX line to two more): when that
+        // earlier try was reverted the same start would only be spent again.
+        let triedLines = s.tried.compactMap { id in rules.first { $0.id == id }?.lines }
         let next = report.matched.compactMap { id in rules.first { $0.id == id } }.first { rule in
             if rule.fixedIn != nil { return false }
             let keys = rule.lines.map(AutoTuneRules.key)
-            if s.tried.contains(rule.id) || keys.contains(where: userKeys.contains) { return false }
+            if s.tried.contains(rule.id) || triedLines.contains(rule.lines) || keys.contains(where: userKeys.contains) { return false }
             // An upgrade raises what auto-tune kept; anything else adds only new keys.
             return rule.upgrade == true ? keys.contains(where: keptKeys.contains) : !keys.contains(where: keptKeys.contains)
         }
