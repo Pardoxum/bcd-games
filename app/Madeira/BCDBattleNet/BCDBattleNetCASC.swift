@@ -7,6 +7,19 @@ import Foundation
 /// CASC V7 local indexes and data envelopes, from the published TACT format.
 /// lookup3 is Bob Jenkins' public-domain hash; all arithmetic wraps at 32 bits.
 enum BCDBnetCASC {
+    private final class Discard: BCDHTTPConsumer {
+        var received: Int64 = 0
+        func begin(at offset: Int64) throws { received = offset }
+        func receive(_ data: Data) throws { received += Int64(data.count) }
+    }
+    private static func receipt(_ build: BCDBnetBuild) -> Data {
+        Data((build.product + "\n" + build.build + "\n").utf8)
+    }
+    /// Recover a completed atomic move if saving the library record was interrupted.
+    static func committed(_ build: BCDBnetBuild, at folder: URL) -> Bool {
+        (try? Data(contentsOf: folder.appendingPathComponent(".bcd-battlenet-build"))) == receipt(build)
+            && FileManager.default.fileExists(atPath: folder.appendingPathComponent(BCDBnetNGDP.program(build.product)).path)
+    }
     static func integer(_ value: UInt64, _ count: Int, little: Bool = true) -> Data {
         Data((0..<count).map { UInt8(truncatingIfNeeded: value >> ((little ? $0 : count - 1 - $0) * 8)) })
     }
@@ -101,14 +114,18 @@ enum BCDBnetCASC {
             let raw = stage.appendingPathComponent("payload/" + payload.key.prefix(2) + "/" + payload.key)
             let input = try FileHandle(forReadingFrom: raw)
             do {
+                let verifier = BCDBnetVerifiedConsumer(target: Discard(), key: payload.key, size: payload.size)
+                try verifier.begin(at: 0)
                 var copied: Int64 = 0
                 while let bytes = try input.read(upToCount: 1 << 20), !bytes.isEmpty {
                     try Task.checkCancellation()
                     copied += Int64(bytes.count)
                     guard copied <= payload.size else { throw BCDContentError.checkFailed }
+                    try verifier.receive(bytes)
                     try file!.write(contentsOf: bytes)
                 }
                 guard copied == payload.size else { throw BCDContentError.checkFailed }
+                try verifier.finish()
                 try input.close()
             } catch { try? input.close(); throw error }
             entries.append(Entry(key: key, archive: archive, offset: position, size: payload.size + 30))
@@ -146,6 +163,7 @@ enum BCDBnetCASC {
         guard fm.fileExists(atPath: output.appendingPathComponent(BCDBnetNGDP.program(build.product)).path) else {
             throw BCDBattleNetError.format("missing-program")
         }
+        try receipt(build).write(to: output.appendingPathComponent(".bcd-battlenet-build"), options: .atomic)
         return output
     }
 }

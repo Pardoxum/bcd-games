@@ -97,6 +97,11 @@ import UniformTypeIdentifiers
         if let id, steam.downloads[id] != nil, SteamGamesModel.shared.games.contains(where: { $0.id == id && $0.installed }) {
             d.updating = true
         }
+        if game.id.hasPrefix("battlenet."),
+           let record = BCDBnetDownloads.shared.installs[String(game.id.dropFirst(10))] {
+            // Missing executables must still allow removal of the managed install.
+            d.removal = .uninstall(frees: record.bytes)
+        }
         guard game.state.isInstalled, let entry = entry(for: game) else { return d }
         let desktop = entry.desktop == true
         let path = entry.windowsPath

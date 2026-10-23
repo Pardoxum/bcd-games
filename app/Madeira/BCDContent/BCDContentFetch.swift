@@ -140,7 +140,7 @@ final class BCDHTTPStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
                     let end = range.split(separator: "/").first?.split(separator: "-").last.flatMap { Int64($0) }
                     guard end == expected.upperBound - 1 else { throw BCDContentError.http(206) }
                 }
-                try request.consumer.begin(at: start)
+                try request.consumer.begin(at: start - (request.range?.lowerBound ?? 0))
             default:
                 throw BCDContentError.http(status)
             }

@@ -133,6 +133,16 @@ enum BCDBnetDownload {
         return build
     }
     static func plan(_ build: BCDBnetBuild) throws -> BCDContentPlan {
+        guard BCDBnetNGDP.products.contains(build.product), !build.payloads.isEmpty else {
+            throw BCDBattleNetError.format("product")
+        }
+        var archive = -1, position: Int64 = 1 << 30
+        for payload in build.payloads {
+            guard payload.size >= 8, payload.size < (1 << 30) - 30 else { throw BCDBattleNetError.format("payload-size") }
+            if position + payload.size + 30 >= 1 << 30 { archive += 1; position = 0 }
+            guard archive < 256 else { throw BCDBattleNetError.unsupported("install over 256 GiB") }
+            position += payload.size + 30
+        }
         var builder = try BCDContentPlanBuilder(key: .init(store: "battlenet", id: build.product),
                 title: BCDBnetNGDP.title(build.product), version: build.build, folder: build.product)
         for payload in build.payloads {

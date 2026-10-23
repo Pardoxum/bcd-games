@@ -21,6 +21,7 @@ extension BCDLiveStore {
         account.start()
         let downloads = BCDBnetDownloads.shared
         downloads.start()
+        for product in Array(downloads.installs.keys) { _ = downloads.entry(product) }
         var installed = Set<String>()
         for entry in LibraryModel.shared.entries {
             guard entry.desktop != true, entry.steamAppID == nil,

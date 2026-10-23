@@ -88,6 +88,7 @@ struct BCDBnetInstall: Codable {
         guard let build = pending(plan.key.id), build.build == plan.version, let root = Self.root.url else { throw BCDBattleNetError.format("pending") }
         let destination = root.appendingPathComponent(build.product, isDirectory: true)
         let work = Task.detached(priority: .utility) {
+            if BCDBnetCASC.committed(build, at: destination) { return }
             let made = try BCDBnetCASC.assemble(build, stage: stage)
             try Task.checkCancellation()
             try BCDContentEngine.commit(stage: made, to: destination)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Battle.net account boundary tests. Synthetic data only; never contacts Blizzard."""
+"""Battle.net account and native download tests. Synthetic data only; never contacts Blizzard."""
 import argparse
 from pathlib import Path
 import shutil
@@ -81,6 +81,14 @@ func refuses(_ label: String, _ body: () throws -> Void) {
         refuses("no credential after expiry") { _ = try credential.request("/api/games-and-subs", now: now.addingTimeInterval(301)) }
         let decoded = try JSONDecoder().decode(BCDBattleNetCredential.self, from: JSONEncoder().encode(credential))
         try require(try decoded.request("/api/details", now: now).value(forHTTPHeaderField: "Cookie") == "session=SECRET", "Keychain round trip")
+        require(decoded.cachedProducts == nil, "credentials saved before library caching remain readable")
+        var cached = credential
+        cached.cachedName = "FixtureAccount"
+        cached.cachedProducts = [.init(id: "wow", title: "World of Warcraft")]
+        cached.updated = now
+        let restored = try JSONDecoder().decode(BCDBattleNetCredential.self, from: JSONEncoder().encode(cached))
+        require(restored.cachedName == "FixtureAccount" && restored.cachedProducts?.first?.id == "wow" && restored.updated == now,
+                "account library snapshot survives a Keychain round trip")
         for json in ["{}", "[]", "{\"gameAccounts\":null}", "not JSON"] {
             refuses("malformed reply refused") { _ = try BCDBattleNetAccount.products(Data(json.utf8)) }
         }
@@ -92,6 +100,7 @@ func refuses(_ label: String, _ body: () throws -> Void) {
         require(BCDBattleNetAccount.installedProduct("WoW/_classic_/WowClassic.exe") == "wow_classic", "Classic import")
         require(BCDBattleNetAccount.installedProduct("WoW/_classic_era_/WowClassic.exe") == "wow_classic_era", "Classic Era import")
         require(BCDBattleNetAccount.installedProduct("Games/Wow.exe") == nil, "unrelated executable not classified")
+        try await runDownloadChecks()
     }
 }
 '''
@@ -103,5 +112,6 @@ with tempfile.TemporaryDirectory(prefix="bcd-battlenet-") as directory:
     subprocess.run([swift, "-swift-version", "5", "-parse-as-library", str(APP / "BCDBattleNet/BCDBattleNetAccount.swift"),
                     *[str(APP / "BCDBattleNet" / file) for file in ["BCDBattleNetNGDP.swift", "BCDBattleNetBLTE.swift", "BCDBattleNetCASC.swift", "BCDBattleNetDownload.swift"]],
                     *[str(APP / "BCDContent" / ("BCDContent" + file + ".swift")) for file in ["Plan", "Codec", "Journal", "Fetch", "Engine"]],
+                    str(ROOT / "tests/host/BCDBattleNetDownloadTests.swift"),
                     str(harness), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True)

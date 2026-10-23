@@ -1,58 +1,82 @@
 # Battle.net / World of Warcraft
 
-This branch is an **experimental account and library integration**, not Steam feature parity.
-It targets official World of Warcraft Retail, Classic and Classic Era. No private servers.
+This branch implements experimental account sign-in, library sync and native WoW downloads.
+It targets official Retail, Classic and Classic Era. Device compatibility and successful
+in-game authentication have not been verified. Keep the integration in draft until tested.
 
-## Implemented
+## Account and library
 
-- Battle.net appears in Settings > Accounts and the library's store filters.
-- Sign-in uses Blizzard's own page in an ephemeral native WebKit sheet, including Blizzard's
-  password and Authenticator flow. BCD does not implement or store a Blizzard password.
-- After sign-in, BCD validates the account portal session against its games API before saving
-  secure cookies applicable to that exact account host in `bcd.battlenet.session` in the existing
-  device-only Keychain. The session and account replies are never logged or cached on disk.
-- Library refresh reads the account's WoW licence and exposes Retail, Classic and Classic Era
-  as client choices. These rows do not assert an active subscription, an expansion entitlement,
-  server availability, or device compatibility. Duplicate subscriptions produce one set of rows.
-- WoW programs already added through Files under `_retail_/Wow.exe`, `_classic_/WowClassic.exe`
-  or `_classic_era_/WowClassic.exe` appear under Battle.net, using the existing library entry's
-  Play, settings and history. They do not receive the portal's cookies or an automatic login.
-- Sign-out deletes the Keychain item and the discovered list, cancels refresh, and prevents late
-  requests from restoring the account. Imported entries and files remain.
+- Settings > Accounts opens Blizzard's own sign-in page in an ephemeral native WebKit sheet,
+  including Blizzard's password and Authenticator flow. BCD does not store the password.
+- The account portal session is validated against its games API before secure cookies are
+  saved in the existing device-only Keychain (`bcd.battlenet.session`). Credentials and API
+  replies are never logged. The last account name and client list are cached with the session
+  in Keychain, so the library can appear while the next refresh is pending.
+- A WoW licence exposes Retail, Classic and Classic Era as client choices. These rows do not
+  assert an active subscription, expansion ownership, server availability or compatibility.
+- Refresh runs on connection and when the library returns to the foreground, with a six-hour
+  freshness interval. Network errors retain the last list. Expired sessions require sign-in.
+- API requests are bounded and never follow redirects with a Cookie header. Sign-out clears
+  the saved account, cancels refresh and pauses downloads. Installed clients remain available.
+- Imported `_retail_/Wow.exe`, `_classic_/WowClassic.exe` and `_classic_era_/WowClassic.exe`
+  retain their existing library IDs, settings and history. Managed downloads get Battle.net IDs.
 
-API requests are bounded and never follow redirects with a Cookie header. If the session expires,
-sign in again. Network errors retain the current list. The web sheet has Cancel and Continue;
-it deliberately offers no Safari paste flow because an account-page URL is not a credential.
+The account UI uses `BCDBnetAccount`, separately from Steam and GOG. Public CDN downloads
+never receive account cookies. WoW uses its own in-game login; portal sign-in is not game login.
 
-## Still required for the requested Steam use case
+## Native downloads
 
-1. A native NGDP/CASC install adapter: version/build/CDN selection per WoW flavour and region,
-   index/root/encoding/install manifests, BLTE decoding, integrity verification, disk checks,
-   resumable install/update/repair, locale selection, and removal through the shared content queue.
-2. A verified game authentication flow, distinct from the account portal and public OAuth profile
-   APIs. Never pass web cookies, borrow another application's client identity, or embed an OAuth
-   client secret to approximate this. Until this exists, players must use the game's own login.
-3. iPhone/iPad tests with official WoW builds, subscription accounts, Authenticator/passkeys,
-   session expiry, Retail/Classic updates, and the Wine/FEX/rendering path. No WoW compatibility
-   or successful login is claimed by this change.
-4. Additional Battle.net products, art, account region selection (including China), cloud saves,
-   friends/chat and achievement support. None are implied by connecting an account.
+The Install action selects the region's current build through Blizzard's HTTPS v2 version
+service, checks build/CDN configuration hashes, and reads encoding, install and download
+manifests. The first implementation selects Windows x64 and enUS. It searches CDN archive
+indexes for selected payloads, then fetches bounded archive ranges or loose files. Planning
+can take time and transfer substantial index metadata before payload progress starts.
 
-Uninstalled Battle.net rows have no Install button while there is no native download driver.
-Do not release or describe this branch as full Battle.net support until the above work is tested.
+Downloads use the shared content queue, including disk checks, pause/resume, cancellation,
+retry and a persistent completion journal. A saved build snapshot pins resumed downloads to
+the same version. Every downloaded BLTE payload is checked against its encoding key and
+frame hashes while streaming and again during assembly. Invalid formats fail explicitly.
 
-## Protocol references and validation
+Finishing writes CASC data archives and V7 local indexes, build/configuration files and the
+selected client programs. Extracted programs are also checked against their content keys.
+The finished folder is committed with an atomic move and registered in the library. A build
+receipt allows retrying library registration if the app stops after that move. Uninstall
+removes the managed client through the existing removal mechanism.
 
-- [Blizzard's OAuth samples](https://github.com/Blizzard/oauth-client-sample): public profile
-  authentication is a separate integration from installing and signing in to games.
+Payloads remain staged during assembly to allow cancellation and resume. The disk check
+reserves roughly twice the encoded download size, plus extracted programs and a margin.
+Temporary payloads are removed after registration. Client files are under
+`C:\Battle.net Games\<product>`. Unrelated folders are never replaced to finish an install.
+
+## Remaining work
+
+- Compile and run the new Swift protocol/engine tests and iOS type checks on Apple's toolchain.
+  Windows source checks cannot verify Swift compilation. GitHub Actions must be enabled.
+- Test real sign-in, Authenticator/passkeys, session expiry and library refresh on a device.
+- Test complete official downloads, launching and in-game login with a subscription account
+  through the Wine/FEX/rendering path. Synthetic fixtures do not demonstrate WoW compatibility.
+- Implement update/repair and selectable locales. Extracted files currently support plain and
+  zlib BLTE frames; encrypted or other codecs fail explicitly. CASC payloads remain encoded.
+- Support other Battle.net products and account regions including China. Cloud saves,
+  friends/chat and achievements are not implemented.
+
+## Checks and protocol references
+
+Run `python3 tests/host/check-battlenet.py --require-swift` on macOS. Synthetic tests cover
+cookie isolation, credential redaction, library caching and deduplication, manifest tag
+selection, BLTE corruption/bounds, archive ranges, disk refusal, journal reuse, CASC assembly
+and interrupted-registration recovery. They never contact Blizzard or execute a game binary.
+The Battle.net workflow also runs shared content/GOG regression tests, iOS adapter type checks
+and shared interface/preview compilation. Full app builds and live device checks remain separate.
+
+- [Blizzard OAuth samples](https://github.com/Blizzard/oauth-client-sample): public profile
+  authentication is separate from installing and signing in to games.
 - [Galaxy Battle.net backend](https://github.com/FriendsOfGalaxy/galaxy-integration-battlenet/blob/master/src/backend.py)
   and [library mapping](https://github.com/FriendsOfGalaxy/galaxy-integration-battlenet/blob/master/src/plugin.py):
-  references for `/api/games-and-subs`, `/api/details`, and WoW title ID 5730135. These are
-  undocumented account-portal endpoints, subject to change. The implementation is independently
-  written; it does not reuse Galaxy's client ID, secret, tokens or code.
+  references for undocumented account portal endpoints and WoW title ID 5730135.
+- [TACTSharp](https://github.com/wowdev/TACTSharp) and
+  [cascette-py](https://github.com/wowemulation-dev/cascette-py): protocol references for
+  public NGDP manifests, BLTE and local CASC layouts. The adapter is independently written.
 
-Run `python3 tests/host/check-battlenet.py --require-swift` on a macOS host. It compiles the
-Foundation account rules and checks host/cookie isolation, malformed replies, deduplication,
-WoW client identification, and credential redaction using synthetic data only. Also run the
-existing GOG/content/settings checks after changes to the shared files. A full iOS build and
-live device verification require Apple's toolchain; Windows source checks are insufficient.
+Small live metadata probes have confirmed the v2 version endpoints, configuration hashes
+and current manifest headers. They have not verified a complete installed game.
