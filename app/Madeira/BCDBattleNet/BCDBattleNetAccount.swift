@@ -28,6 +28,9 @@ struct BCDBattleNetCredential: Codable, CustomStringConvertible, CustomDebugStri
     }
     var origin: URL
     var cookies: [Cookie]
+    var cachedName: String? = nil
+    var cachedProducts: [BCDBattleNetProduct]? = nil
+    var updated: Date? = nil
     var description: String { "BCDBattleNetCredential(<redacted>)" }
     var debugDescription: String { description }
 
@@ -51,12 +54,14 @@ struct BCDBattleNetCredential: Codable, CustomStringConvertible, CustomDebugStri
 }
 
 enum BCDBattleNetError: Error, LocalizedError {
-    case signedOut, reply, http(Int)
+    case signedOut, reply, http(Int), format(String), unsupported(String)
     var errorDescription: String? {
         switch self {
         case .signedOut: return "Sign in to Battle.net again to refresh your games."
         case .reply: return "BCD couldn't read Battle.net's account reply. Try again later."
         case .http: return "Battle.net couldn't be reached. Try again later."
+        case .format: return "Battle.net's download metadata failed its checks. Try again later."
+        case .unsupported(let feature): return "This Battle.net build needs an unsupported download feature: \(feature)."
         }
     }
 }

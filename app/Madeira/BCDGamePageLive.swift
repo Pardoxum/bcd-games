@@ -55,6 +55,7 @@ import UniformTypeIdentifiers
         case .local(let id)?:
             return library.entries.first { $0.id == id } ?? (id == LibraryEntry.desktopID ? LibraryEntry.desktopEntry : nil)
         case nil:
+            if game.id.hasPrefix("battlenet.") { return BCDBnetDownloads.shared.entry(String(game.id.dropFirst(10))) }
             // An installed GOG game is the library entry its install made (BCDLiveStoreGOG).
             if let product = BCDLiveStore.gogProduct(game.id) {
                 guard BCDGOG.enabled, let id = BCDGOG.shared.installs[product]?.entryID else { return nil }
@@ -124,7 +125,7 @@ import UniformTypeIdentifiers
             if SteamOwnedLibrary.cloudEnabled { cloud(id, into: &d) }
             d.canRepair = SteamOwnedLibrary.enabled && managed && !downloading && steam.signedIn
             if managed && !downloading { d.removal = .uninstall(frees: entry.folderBytes ?? game.size) }
-        } else if game.store == .gog {
+        } else if game.store == .gog || game.id.hasPrefix("battlenet.") {
             // Uninstall deletes a GOG game's files through the store (BCDLiveStoreGOG).
             d.removal = .uninstall(frees: entry.folderBytes ?? game.size)
         } else if !desktop {

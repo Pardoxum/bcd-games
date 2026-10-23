@@ -5,7 +5,7 @@
 import Combine
 import Foundation
 
-/// WoW account discovery. No launcher credentials, download driver or game-login ticket yet.
+/// WoW account discovery and session cache. Game login remains the game's own login.
 @MainActor final class BCDBattleNet: ObservableObject {
     static let shared = BCDBattleNet()
     @Published private(set) var signedIn = false
@@ -19,15 +19,23 @@ import Foundation
     private var updated: Date?
     private var task: Task<Void, Never>?
     private var signInOpen = false
+    var downloadRegion: String {
+        let prefix = credential?.origin.host?.split(separator: ".").first.map(String.init) ?? "us"
+        return BCDBnetNGDP.regions.contains(prefix) ? prefix : "us"
+    }
 
     func start() {
         guard !started else { return }
         started = true
+        BCDBnetDownloads.shared.start()
         credential = BCDKeychain.shared.read(BCDBattleNetAccount.secretItem)
             .flatMap { try? JSONDecoder().decode(BCDBattleNetCredential.self, from: $0) }
         guard let credential, BCDBattleNetAccount.validOrigin(credential.origin) else { return }
         signedIn = true
-        refresh()
+        name = credential.cachedName
+        products = credential.cachedProducts ?? []
+        updated = credential.updated
+        refresh(force: true)
     }
 
     func signIn() {
@@ -42,6 +50,8 @@ import Foundation
             let result = try await self.read(made)
             try Task.checkCancellation()
             guard self.generation == expected else { throw CancellationError() }
+            var made = made
+            made.cachedName = result.name; made.cachedProducts = result.products; made.updated = Date()
             try BCDKeychain.shared.write(BCDBattleNetAccount.secretItem, JSONEncoder().encode(made))
             // An older refresh must not overwrite this account, including its error state.
             self.generation += 1
@@ -55,6 +65,7 @@ import Foundation
     func signOut() {
         generation += 1
         task?.cancel(); task = nil
+        BCDBnetDownloads.shared.pauseAll()
         BCDKeychain.shared.delete(BCDBattleNetAccount.secretItem)
         credential = nil; signedIn = false; name = nil; products = []
         updated = nil; error = nil; refreshing = false
@@ -73,7 +84,12 @@ import Foundation
                 let result = try await read(credential)
                 try Task.checkCancellation()
                 guard generation == expected else { return }
-                name = result.name; products = result.products; updated = Date(); error = nil
+                var fresh = credential
+                fresh.cachedName = result.name ?? credential.cachedName
+                fresh.cachedProducts = result.products; fresh.updated = Date()
+                try BCDKeychain.shared.write(BCDBattleNetAccount.secretItem, JSONEncoder().encode(fresh))
+                self.credential = fresh
+                name = fresh.cachedName; products = result.products; updated = fresh.updated; error = nil
             } catch is CancellationError {
                 return
             } catch {

@@ -373,7 +373,7 @@ struct BCDAccountsSection<Backend: BCDAccountsBackend>: View {
                 BCDSectionKit.Note(text: "Battle.net is unavailable in this copy of BCD.", symbol: "nosign")
             } else {
                 Text(account.accountName ?? "Not signed in").bcdFont(.heading, 19)
-                BCDSectionKit.Note(text: "Connect your Battle.net account to see WoW Retail, Classic and Classic Era in your library. Downloads and automatic game login aren't available yet.", symbol: "info.circle")
+                BCDSectionKit.Note(text: "Connect your Battle.net account to sync WoW Retail, Classic and Classic Era, then download the Windows clients. Sign in inside WoW when you play.", symbol: "info.circle")
                 if let error = backend.battleNetError {
                     BCDSectionKit.Note(text: error, symbol: "exclamationmark.triangle")
                 }

@@ -33,8 +33,6 @@ import Foundation
 import FoundationNetworking
 #endif
 
-enum BCDContentError: Error { case http(Int), tooLarge }
-struct BCDContentChunk {}
 
 func require(_ value: @autoclosure () throws -> Bool, _ label: String) rethrows {
     guard try value() else { fatalError("FAIL: " + label) }
@@ -45,7 +43,7 @@ func refuses(_ label: String, _ body: () throws -> Void) {
     fatalError("FAIL: " + label)
 }
 @main struct Checks {
-    static func main() throws {
+    static func main() async throws {
         let origin = URL(string: "https://account.blizzard.com")!
         let now = Date(timeIntervalSince1970: 1000)
         for address in ["http://account.blizzard.com/games", "https://account.blizzard.com.evil.test/games",
@@ -103,6 +101,7 @@ with tempfile.TemporaryDirectory(prefix="bcd-battlenet-") as directory:
     harness.write_text(HARNESS)
     executable = directory / "checks"
     subprocess.run([swift, "-swift-version", "5", "-parse-as-library", str(APP / "BCDBattleNet/BCDBattleNetAccount.swift"),
-                    str(APP / "BCDContent/BCDContentFetch.swift"),
+                    *[str(APP / "BCDBattleNet" / file) for file in ["BCDBattleNetNGDP.swift", "BCDBattleNetBLTE.swift", "BCDBattleNetCASC.swift", "BCDBattleNetDownload.swift"]],
+                    *[str(APP / "BCDContent" / ("BCDContent" + file + ".swift")) for file in ["Plan", "Codec", "Journal", "Fetch", "Engine"]],
                     str(harness), "-o", str(executable)], check=True)
     subprocess.run([str(executable)], check=True)

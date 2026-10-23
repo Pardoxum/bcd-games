@@ -25,11 +25,13 @@ final class BCDHTTPStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
     private final class Request {
         let consumer: BCDHTTPConsumer
         let offset: Int64
+        let range: Range<Int64>?
         let continuation: CheckedContinuation<Void, Error>
         var failure: Error?
-        init(_ consumer: BCDHTTPConsumer, _ offset: Int64, _ continuation: CheckedContinuation<Void, Error>) {
+        init(_ consumer: BCDHTTPConsumer, _ offset: Int64, _ range: Range<Int64>?, _ continuation: CheckedContinuation<Void, Error>) {
             self.consumer = consumer
             self.offset = offset
+            self.range = range
             self.continuation = continuation
         }
     }
@@ -65,15 +67,20 @@ final class BCDHTTPStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
 
     /// GETs `request` into `consumer`, continuing a dropped connection up to `resumes` times.
     /// Status codes other than 200 and 206 throw `BCDContentError.http`.
-    func fetch(_ request: URLRequest, into consumer: BCDHTTPConsumer, resumes: Int = 2) async throws {
+    func fetch(_ request: URLRequest, into consumer: BCDHTTPConsumer, resumes: Int = 2,
+               range: Range<Int64>? = nil) async throws {
+        if let range, range.lowerBound < 0 || range.upperBound <= range.lowerBound { throw BCDContentError.http(206) }
         var dropped = 0
         while true {
             try Task.checkCancellation()
             let offset = consumer.received
             var attempt = request
-            if offset > 0 { attempt.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
+            if let range {
+                guard offset < range.upperBound - range.lowerBound else { throw BCDContentError.http(206) }
+                attempt.setValue("bytes=\(range.lowerBound + offset)-\(range.upperBound - 1)", forHTTPHeaderField: "Range")
+            } else if offset > 0 { attempt.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range") }
             do {
-                try await one(attempt, offset: offset, consumer: consumer)
+                try await one(attempt, offset: offset, consumer: consumer, range: range)
                 return
             } catch let error as URLError where Self.resumable(error) && dropped < resumes && consumer.received > offset {
                 dropped += 1
@@ -92,12 +99,12 @@ final class BCDHTTPStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
         [.networkConnectionLost, .timedOut, .cannotParseResponse, .badServerResponse].contains(error.code)
     }
 
-    private func one(_ request: URLRequest, offset: Int64, consumer: BCDHTTPConsumer) async throws {
+    private func one(_ request: URLRequest, offset: Int64, consumer: BCDHTTPConsumer, range: Range<Int64>?) async throws {
         let task = session.dataTask(with: request)
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 lock.lock()
-                requests[task.taskIdentifier] = Request(consumer, offset, continuation)
+                requests[task.taskIdentifier] = Request(consumer, offset, range, continuation)
                 lock.unlock()
                 if Task.isCancelled { task.cancel() }
                 task.resume()
@@ -122,12 +129,17 @@ final class BCDHTTPStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
         do {
             switch status {
             case 200:
+                guard request.range == nil else { throw BCDContentError.http(200) }
                 try request.consumer.begin(at: 0)
             case 206:
                 // "bytes <start>-<end>/<total>": the body must start where the request asked.
                 let range = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Range") ?? ""
                 let start = range.hasPrefix("bytes ") ? Int64(range.dropFirst(6).prefix { $0 != "-" }) : nil
-                guard let start, start == request.offset else { throw BCDContentError.http(206) }
+                guard let start, start == request.offset + (request.range?.lowerBound ?? 0) else { throw BCDContentError.http(206) }
+                if let expected = request.range {
+                    let end = range.split(separator: "/").first?.split(separator: "-").last.flatMap { Int64($0) }
+                    guard end == expected.upperBound - 1 else { throw BCDContentError.http(206) }
+                }
                 try request.consumer.begin(at: start)
             default:
                 throw BCDContentError.http(status)
@@ -230,4 +242,14 @@ protocol BCDChunkSource: AnyObject, Sendable {
     func urls(for chunk: BCDContentChunk) async throws -> [URL]
     /// A host answered 401, 403 or 410 for this group: its addresses expired or were refused.
     func refresh(group: String) async throws
+    /// Store-specific validation and archive ranges, with the ordinary GET as the default.
+    func fetch(_ chunk: BCDContentChunk, url: URL, into consumer: BCDHTTPConsumer, stream: BCDHTTPStream) async throws
+}
+
+extension BCDChunkSource {
+    func fetch(_ chunk: BCDContentChunk, url: URL, into consumer: BCDHTTPConsumer, stream: BCDHTTPStream) async throws {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        try await stream.fetch(request, into: consumer)
+    }
 }

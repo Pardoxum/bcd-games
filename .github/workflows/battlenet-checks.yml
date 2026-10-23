@@ -1,5 +1,7 @@
 name: Battle.net account checks
 on:
+  push:
+    branches: [battle.net-support]
   workflow_dispatch:
   pull_request:
     paths:
@@ -25,7 +27,11 @@ jobs:
       - run: python3 tests/host/check-battlenet.py --require-swift
       - name: Typecheck account adapter against iOS SDK
         run: |
-          xcrun --sdk iphoneos swiftc -typecheck -swift-version 5 -target arm64-apple-ios18.0 -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" app/Madeira/BCDBattleNet/BCDBattleNetAccount.swift app/Madeira/BCDBattleNet/BCDBattleNet.swift app/Madeira/BCDBattleNet/BCDBattleNetSignIn.swift app/Madeira/BCDContent/BCDContentFetch.swift app/Madeira/BCDContent/BCDContentSecrets.swift tests/host/battlenet-ios-stubs.swift
+          xcrun --sdk iphoneos swiftc -typecheck -swift-version 5 -target arm64-apple-ios18.0 -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" app/Madeira/BCDBattleNet/*.swift app/Madeira/BCDStore.swift app/Madeira/BCDContent/BCDContent{Plan,Codec,Journal,Fetch,Engine,Queue,Secrets}.swift tests/host/battlenet-ios-stubs.swift
+      - name: Shared content and GOG regression tests
+        run: |
+          python3 tests/host/check-content-engine.py --require-swift
+          python3 tests/host/check-gog.py --require-swift
       - name: Parse iOS sources
         run: |
           xcrun swiftc -frontend -parse app/Madeira/BCDBattleNet/*.swift app/Madeira/BCDAccounts.swift app/Madeira/BCDAccountsLive.swift app/Madeira/BCDStore.swift app/Madeira/BCDLiveStore.swift app/Madeira/BCDGamePage.swift app/Madeira/BCDContent/BCDContentFetch.swift app/BCDPreview/BCDPreviewAccounts.swift
