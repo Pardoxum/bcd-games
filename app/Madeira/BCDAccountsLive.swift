@@ -66,7 +66,7 @@ struct BCDSteamSignInSheet: View {
     @Published private(set) var steam = BCDSteamAccount()
     @Published private(set) var signInProgress = BCDSteamSignIn()
     @Published private(set) var gogAccount = BCDAccount(store: .gog, name: nil, available: false)
-    @Published private(set) var battleNetAccount = BCDAccount(store: .battlenet, name: nil, available: true)
+    @Published private(set) var battleNetAccount = BCDBnetAccount()
     @Published private(set) var battleNetError: String?
     private var watching: Set<AnyCancellable> = []
 
@@ -103,7 +103,9 @@ struct BCDSteamSignInSheet: View {
         let gog = BCDLiveStore.shared.gogAccount()
         if gog != gogAccount { gogAccount = gog }
         BCDBattleNet.shared.start()
-        battleNetAccount = BCDLiveStore.shared.battleNetAccount()
+        let battleNet = BCDLiveStore.shared.battleNetAccount()
+        let accountState = BCDBnetAccount(available: battleNet.available, accountName: battleNet.name)
+        if accountState != battleNetAccount { battleNetAccount = accountState }
         battleNetError = BCDBattleNet.shared.error
     }
 

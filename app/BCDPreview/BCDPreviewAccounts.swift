@@ -15,7 +15,7 @@ import UIKit
     @Published private(set) var steam: BCDSteamAccount
     @Published private(set) var signInProgress = BCDSteamSignIn()
     @Published private(set) var gogAccount: BCDAccount
-    @Published private(set) var battleNetAccount: BCDAccount
+    @Published private(set) var battleNetAccount: BCDBnetAccount
     var battleNetError: String? { nil }
     private var pendingName: String?
 
@@ -24,7 +24,7 @@ import UIKit
         steam = BCDSteamAccount(available: true, accountName: signedOut ? nil : "player", personaName: nil, avatar: nil,
                                 cloudAvailable: true, cloudOn: true, setupAvailable: true)
         gogAccount = BCDAccount(store: .gog, name: signedOut ? nil : "gogplayer", available: true)
-        battleNetAccount = BCDAccount(store: .battlenet, name: signedOut ? nil : "WoWPlayer#1234", available: true)
+        battleNetAccount = BCDBnetAccount(available: true, accountName: signedOut ? nil : "WoWPlayer#1234")
         switch variant {
         case "guard":
             signInProgress = BCDSteamSignIn(busy: false, steamGuard: BCDSteamGuard(code: .steamApp, canApprove: true))
@@ -67,8 +67,8 @@ import UIKit
     func runSetup() {}
     func signInGOG() { gogAccount.name = "gogplayer" }
     func signOutGOG() { gogAccount.name = nil }
-    func signInBattleNet() { battleNetAccount.name = "WoWPlayer#1234" }
-    func signOutBattleNet() { battleNetAccount.name = nil }
+    func signInBattleNet() { battleNetAccount.accountName = "WoWPlayer#1234" }
+    func signOutBattleNet() { battleNetAccount.accountName = nil }
 
     /// A QR code that says only that it is a sample.
     static let sampleCode: UIImage? = {

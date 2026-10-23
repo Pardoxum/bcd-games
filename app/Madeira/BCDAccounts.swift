@@ -29,6 +29,13 @@ struct BCDSteamAccount: Equatable {
     var setupAvailable = false
 }
 
+/// The Battle.net account as the Accounts section shows it.
+struct BCDBnetAccount: Equatable {
+    var available = true
+    /// The BattleTag or account label; nil when nobody is signed in.
+    var accountName: String?
+}
+
 /// What Steam Guard asks for after the password: a code (from the Steam app or an email),
 /// an approval in the Steam app, or either.
 struct BCDSteamGuard: Equatable {
@@ -70,7 +77,7 @@ struct BCDSteamSignIn: Equatable {
     /// Opens GOG's own sign-in page.
     func signInGOG()
     func signOutGOG()
-    var battleNetAccount: BCDAccount { get }
+    var battleNetAccount: BCDBnetAccount { get }
     var battleNetError: String? { get }
     func signInBattleNet()
     func signOutBattleNet()
@@ -131,7 +138,7 @@ struct BCDAccountsSection<Backend: BCDAccountsBackend>: View {
         .onChange(of: backend.gogAccount.name) { _, name in
             if name == nil { confirmingGOGSignOut = false }
         }
-        .onChange(of: backend.battleNetAccount.name) { _, name in
+        .onChange(of: backend.battleNetAccount.accountName) { _, name in
             if name == nil { confirmingBattleNetSignOut = false }
         }
     }
@@ -365,12 +372,12 @@ struct BCDAccountsSection<Backend: BCDAccountsBackend>: View {
             if !account.available {
                 BCDSectionKit.Note(text: "Battle.net is unavailable in this copy of BCD.", symbol: "nosign")
             } else {
-                Text(account.name ?? "Not signed in").bcdFont(.heading, 19)
+                Text(account.accountName ?? "Not signed in").bcdFont(.heading, 19)
                 BCDSectionKit.Note(text: "Connect your Battle.net account to see WoW Retail, Classic and Classic Era in your library. Downloads and automatic game login aren't available yet.", symbol: "info.circle")
                 if let error = backend.battleNetError {
                     BCDSectionKit.Note(text: error, symbol: "exclamationmark.triangle")
                 }
-                if account.name != nil {
+                if account.accountName != nil {
                     if confirmingBattleNetSignOut {
                         BCDSectionKit.Confirm(title: "Sign out of Battle.net?",
                             message: "BCD forgets this device's Battle.net session and its WoW list. This doesn't sign you out in other apps or delete any game files.",
