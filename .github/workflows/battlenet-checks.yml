@@ -27,6 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 tests/host/check-battlenet.py --require-swift
+      - name: Check public WoW bootstrap metadata (no game payloads)
+        continue-on-error: true
+        run: python3 tests/host/check-battlenet.py --require-swift --live-metadata
       - name: Typecheck account and download adapters against iOS SDK
         run: |
           xcrun --sdk iphoneos swiftc -typecheck -swift-version 5 -target arm64-apple-ios18.0 -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" app/Madeira/BCDBattleNet/*.swift app/Madeira/BCDStore.swift app/Madeira/BCDContent/BCDContent{Plan,Codec,Journal,Fetch,Engine,Queue,Secrets}.swift tests/host/battlenet-ios-stubs.swift

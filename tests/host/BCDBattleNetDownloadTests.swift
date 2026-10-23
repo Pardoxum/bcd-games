@@ -1,5 +1,29 @@
-// Synthetic protocol fixtures: no account credentials, game binaries or live CDN traffic.
+// Synthetic protocol fixtures; optional live check fetches public bootstrap metadata only.
 import Foundation
+
+func runLiveMetadataChecks() async throws {
+    let build = try await BCDBnetDownload.metadata("wow_classic_era", region: "us")
+    let config = try BCDBnetNGDP.config(build.buildConfig, key: build.build)
+    func manifest(_ name: String, limit: Int) async throws -> Data {
+        guard let pair = config[name], pair.count == 2,
+              let sizes = config[name + "-size"], sizes.count == 2,
+              let encoded = Int(sizes[1]), encoded > 0, encoded <= limit,
+              let decoded = Int(sizes[0]), decoded > 0, decoded <= limit else {
+            throw BCDBattleNetError.format("live-manifest-config")
+        }
+        let raw = try await BCDBnetDownload.get(build.urls("data", key: pair[1]), limit: encoded)
+        let data = try BCDBnetBLTE.decode(raw, key: pair[1], limit: decoded)
+        require(raw.count == encoded && data.count == decoded && BCDBnetNGDP.md5(data) == pair[0], "live " + name + " hashes and sizes")
+        return data
+    }
+    let encoding = try await manifest("encoding", limit: 256 << 20)
+    let install = try BCDBnetNGDP.install(await manifest("install", limit: 32 << 20), locale: "enUS")
+    let download = try BCDBnetNGDP.download(await manifest("download", limit: 128 << 20), locale: "enUS")
+    let wanted = Set(install.map(\.content) + Array((config["root"] ?? []).prefix(1)))
+    let mapping = try BCDBnetNGDP.encoding(encoding, wanted: wanted)
+    require(!download.isEmpty && mapping.count == wanted.count, "live manifests resolve selected Windows content and root")
+    require(install.contains { $0.path == "WowClassic.exe" || $0.path == BCDBnetNGDP.program(build.product) }, "live install contains the expected WoW client")
+}
 
 private func be(_ value: Int, _ count: Int) -> Data { BCDBnetCASC.integer(UInt64(value), count, little: false) }
 private func plainBLTE(_ body: Data) -> Data { Data("BLTE".utf8) + Data(repeating: 0, count: 4) + Data([78]) + body }

@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "app/Madeira"
 parser = argparse.ArgumentParser()
 parser.add_argument("--require-swift", action="store_true")
+parser.add_argument("--live-metadata", action="store_true", help="also validate public Classic Era bootstrap metadata; no game payloads")
 args = parser.parse_args()
 
 # Build membership and preview isolation are checked even without Apple's toolchain.
@@ -101,6 +102,7 @@ func refuses(_ label: String, _ body: () throws -> Void) {
         require(BCDBattleNetAccount.installedProduct("WoW/_classic_era_/WowClassic.exe") == "wow_classic_era", "Classic Era import")
         require(BCDBattleNetAccount.installedProduct("Games/Wow.exe") == nil, "unrelated executable not classified")
         try await runDownloadChecks()
+        if CommandLine.arguments.contains("--live-metadata") { try await runLiveMetadataChecks() }
     }
 }
 '''
@@ -114,4 +116,4 @@ with tempfile.TemporaryDirectory(prefix="bcd-battlenet-") as directory:
                     *[str(APP / "BCDContent" / ("BCDContent" + file + ".swift")) for file in ["Plan", "Codec", "Journal", "Fetch", "Engine"]],
                     str(ROOT / "tests/host/BCDBattleNetDownloadTests.swift"),
                     str(harness), "-o", str(executable)], check=True)
-    subprocess.run([str(executable)], check=True)
+    subprocess.run([str(executable)] + (["--live-metadata"] if args.live_metadata else []), check=True)
